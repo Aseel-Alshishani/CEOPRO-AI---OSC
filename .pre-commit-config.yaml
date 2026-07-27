@@ -1,0 +1,10 @@
+﻿# CEOPRO AI - Automated Pre-Commit Hook Configuration
+repos:
+  - repo: https://github.com
+    rev: v4.5.0
+    hooks:
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-added-large-files
+      - id: detect-private-key  # Critical security check to prevent secret distribution leaks
