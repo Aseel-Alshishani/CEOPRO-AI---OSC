@@ -28,3 +28,9 @@ To prove real-time access before handing over to Web App and AI teams, run:
 pip install psycopg2-binary redis
 python check_connectivity.py
 ```
+
+## 5. Mock Infrastructure Spin-Up (One-Command Quickstart)
+To spin up the entire isolated technical mock environment and seed the data broker streams in one continuous workflow execution, run the following unified command:
+```powershell
+docker compose up -d; python src/infrastructure/init_broker.py; python src/infrastructure/check_connectivity.py
+```
