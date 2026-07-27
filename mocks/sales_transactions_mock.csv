@@ -1,0 +1,4 @@
+﻿transaction_id,tenant_id,product_id,product_name,quantity_sold,unit_price,total_price,sale_source,transaction_date
+t1-uuid,tenant-alpha-123,p1-uuid,Sunscreen SPF 50,2,18.00,36.00,POS,2026-07-27T10:00:00Z
+t2-uuid,tenant-alpha-123,p2-uuid,Moisturizer Lotion,1,22.50,22.50,QuickSale,2026-07-27T11:15:00Z
+t3-uuid,tenant-beta-456,p1-uuid,Sunscreen SPF 50,5,18.00,90.00,API,2026-07-27T09:30:00Z
