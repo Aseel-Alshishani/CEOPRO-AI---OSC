@@ -1,0 +1,30 @@
+﻿{
+  "id": null,
+  "title": "CEOPRO AI - Core Backend Architecture System",
+  "tags": ["production", "core"],
+  "style": "dark",
+  "timezone": "browser",
+  "editable": false,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Throughput - Request Rate (RPS)",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "targets": [{ "expr": "sum(rate(http_requests_total{job='ceopro-core-backend'}[1m]))", "legendFormat": "Total Throughput" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Error Rate - 5xx Server Anomalies",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "targets": [{ "expr": "sum(rate(http_requests_total{job='ceopro-core-backend', status=~'5..'}[1m]))", "legendFormat": "Critical Failures" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Latency Profile - P99 Quantile Intervals",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "targets": [{ "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{job='ceopro-core-backend'}[5m])) by (le))", "legendFormat": "P99 Execution Response" }]
+    }
+  ],
+  "schemaVersion": 38,
+  "refresh": "5s"
+}

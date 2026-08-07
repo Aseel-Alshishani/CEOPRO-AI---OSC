@@ -1,0 +1,18 @@
+﻿global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: 'ceopro-core-backend'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['backend:8000']
+
+  - job_name: 'ceopro-ai-inference'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['ai:8001']
+
+  - job_name: 'ceopro-redis-broker'
+    static_configs:
+      - targets: ['redis-exporter:9121']

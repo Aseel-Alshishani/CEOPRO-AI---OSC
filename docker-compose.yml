@@ -5,17 +5,17 @@ services:
     image: pgvector/pgvector:15-pgorg
     container_name: ceopro_postgres
     environment:
-      POSTGRES_USER: 
-      POSTGRES_PASSWORD: 
-      POSTGRES_DB: 
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
-      - ceopro_network
+      - ceopro_core_net
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U  -d "]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -28,12 +28,68 @@ services:
     volumes:
       - redis_data:/data
     networks:
-      - ceopro_network
+      - ceopro_core_net
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 5
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.55.0-alpine
+    container_name: ceopro_redis_exporter
+    environment:
+      - REDIS_ADDR=redis://ceopro_redis:6379
+    ports:
+      - "9121:9121"
+    networks:
+      - ceopro_core_net
+      - ceopro_telemetry_net
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: ceopro_prometheus
+    mem_limit: 512m
+    volumes:
+      - ./src/infrastructure/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - "9090:9090"
+    networks:
+      - ceopro_core_net
+      - ceopro_telemetry_net
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: ceopro_grafana
+    mem_limit: 256m
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./src/infrastructure/monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./src/infrastructure/monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./src/infrastructure/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports:
+      - "3000:3000"
+    networks:
+      - ceopro_telemetry_net
+    depends_on:
+      prometheus:
+        condition: service_started
 
   minio:
     image: minio/minio
@@ -42,12 +98,12 @@ services:
       - "9000:9000"
       - "9001:9001"
     environment:
-      MINIO_ROOT_USER: 
-      MINIO_ROOT_PASSWORD: 
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     volumes:
       - minio_data:/data
     networks:
-      - ceopro_network
+      - ceopro_core_net
     command: server /data --console-address ":9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
@@ -58,8 +114,12 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  prometheus_data:
+  grafana_data:
   minio_data:
 
 networks:
-  ceopro_network:
+  ceopro_core_net:
+    driver: bridge
+  ceopro_telemetry_net:
     driver: bridge

@@ -1,0 +1,30 @@
+﻿{
+  "id": null,
+  "title": "CEOPRO AI - Redis Transaction Broker Network",
+  "tags": ["production", "broker"],
+  "style": "dark",
+  "timezone": "browser",
+  "editable": false,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Active Broker Command Velocity",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "targets": [{ "expr": "rate(redis_commands_processed_total[1m])", "legendFormat": "Operations Rate" }]
+    },
+    {
+      "type": "gauge",
+      "title": "Connected Cluster Node Topologies",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "targets": [{ "expr": "redis_connected_clients", "legendFormat": "Active Sockets" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory Consumption Curve",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "targets": [{ "expr": "redis_memory_used_bytes", "legendFormat": "Allocated Volume Bytes" }]
+    }
+  ],
+  "schemaVersion": 38,
+  "refresh": "5s"
+}

@@ -1,0 +1,30 @@
+﻿{
+  "id": null,
+  "title": "CEOPRO AI - Accelerated AI Inference Microservice",
+  "tags": ["production", "ai"],
+  "style": "dark",
+  "timezone": "browser",
+  "editable": false,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Inference Demand Rate",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "targets": [{ "expr": "sum(rate(http_requests_total{job='ceopro-ai-inference'}[1m]))", "legendFormat": "Model Requests" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Inference Compute Failure Thresholds",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "targets": [{ "expr": "sum(rate(http_requests_total{job='ceopro-ai-inference', status=~'5..'}[1m]))", "legendFormat": "Inference Failures" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Model Processing Latency (P95)",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "targets": [{ "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job='ceopro-ai-inference'}[5m])) by (le))", "legendFormat": "P95 Inference Window" }]
+    }
+  ],
+  "schemaVersion": 38,
+  "refresh": "5s"
+}
