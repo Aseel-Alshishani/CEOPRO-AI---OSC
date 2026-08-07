@@ -92,6 +92,39 @@ entry's integration test work lands in the next commit.
   synthetic data (`test_model.py`) and a seeded integration DB (`test_integration_db.py`), not yet
   against production data because none exists.
 
+## 2026-08-07 — Redis consumer verified against a real Redis instance
+
+Extended the same "verify against real infra, not mocks" approach from the earlier entry today to
+`consumer.py`: `ForecastRequestConsumer.__init__` calls `xgroup_create` eagerly against a real Redis
+connection (a `ConnectionError` there isn't caught), so it can't be constructed against a mocked
+client the way `pipeline.run_forecast`'s DB calls could be mocked in `test_pipeline.py`.
+
+Spun up an isolated, disposable `redis:7-alpine` container (port 6380 — separate from the existing
+long-running `ceopro_redis` dev container, which was left untouched, same as the Postgres container
+in the earlier entry). Added `src/ai/tests/test_consumer.py`, 6 tests:
+- Consumer group is actually created on the stream at construction time.
+- Payload validation (`_handle_message`) rejects messages missing `tenant_id`/`product_id`.
+- `horizon_days` is correctly parsed from the payload string and defaults to 7 when absent.
+- A full publish → `xreadgroup` → handle → `xack` cycle — the same sequence `listen()`'s loop uses —
+  leaves zero pending messages afterward, confirmed via `XPENDING`.
+
+All 6 passed on the first run — no bugs found this time (the consumer's logic is small and the
+earlier `pipeline.py`/`features.py` fixes had already been exercised by `test_pipeline.py`).
+
+Skipped automatically unless `AI_TEST_REDIS_HOST` is set, so this doesn't affect CI or require
+Docker on every machine, matching the `test_integration_db.py` convention.
+
+**Full suite after this addition:** 37 tests total (26 fully offline, 5 live-Postgres, 6 live-Redis).
+Confirmed via two runs: all 11 integration/consumer tests skip cleanly with no env vars set
+(26 passed, 11 skipped), and all 37 pass when both `AI_TEST_DATABASE_URL` and `AI_TEST_REDIS_HOST`
+are set against disposable containers. `flake8` (both the CI's blocking and non-blocking checks):
+0 issues.
+
+**Still not covered by any test:** the `listen()` method's own `while True` loop, `KeyboardInterrupt`
+handling, and its `finally`-block cleanup — only the per-message handling logic it calls is tested.
+Low risk (it's a thin wrapper around already-tested pieces) but worth naming explicitly rather than
+leaving it implied.
+
 ## How to add an entry
 
 1. New date-stamped `##` section at the bottom (never edit history).

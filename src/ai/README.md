@@ -86,8 +86,16 @@ AI_TEST_DATABASE_URL="postgresql://ceopro_admin:local_test_password_only@localho
 docker rm -f ceopro_postgres_aitest
 ```
 
-`consumer.py` additionally requires `REDIS_HOST`/`REDIS_PORT` and isn't covered by any automated
-test yet (needs a running Redis stream to consume from).
+`test_consumer.py` covers `ForecastRequestConsumer` (payload validation, and the same
+publish/xreadgroup/handle/xack cycle `listen()` uses) against a real Redis — constructing the
+consumer calls `xgroup_create` eagerly, so a mocked client can't stand in for this one. Skipped
+unless `AI_TEST_REDIS_HOST` is set:
+
+```bash
+docker run -d --name ceopro_redis_aitest -p 6380:6379 redis:7-alpine
+AI_TEST_REDIS_HOST=localhost AI_TEST_REDIS_PORT=6380 pytest src/ai/tests/test_consumer.py
+docker rm -f ceopro_redis_aitest
+```
 
 See [`AI_PROGRESS.md`](../../AI_PROGRESS.md) at the repo root for the dated log of what's been built,
 what tests found, and what's still blocked.
