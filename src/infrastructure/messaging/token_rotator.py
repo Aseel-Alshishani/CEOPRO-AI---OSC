@@ -40,6 +40,7 @@ class TokenRotationEngine:
                 tracker_key = f"ceopro:auth:ttl_tracker:{legacy_token}"
                 pipe.setex(tracker_key, self.grace_period, "active_grace")
             pipe.execute()
+            logger.info("Cryptographic secret rotation executed successfully without telemetry leakage")
             return new_token, legacy_token
         except Exception as e:
             logger.error(f"Rotation failure within infrastructure runtime layer: {str(e)}")
@@ -66,5 +67,4 @@ class TokenRotationEngine:
 
 if __name__ == "__main__":
     rotator = TokenRotationEngine()
-    new_t, old_t = rotator.execute_secure_rotation()
-    print(f"NEW_TOKEN={new_t}")
+    rotator.execute_secure_rotation()
