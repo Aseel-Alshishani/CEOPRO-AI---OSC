@@ -11,7 +11,7 @@ permissions:
   security-events: write
 
 jobs:
-  code-security-and-lint:
+  enterprise-security-audit:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code Repository Cluster
@@ -26,7 +26,41 @@ jobs:
       - name: Install Hardened Testing Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install flake8 pytest fastapi pydantic
+          pip install flake8 pytest fastapi pydantic pip-audit safety
+
+      - name: Execute Strict Dependency Vulnerability Scan via Pip-Audit
+        run: |
+          if [ -f requirements.txt ]; then
+            pip-audit -r requirements.txt --strict --format json --output audit-report.json
+          else
+            pip-audit --strict --format json --output audit-report.json
+          fi
+
+      - name: Execute Secondary Package Verification via Safety DB
+        run: |
+          if [ -f requirements.txt ]; then
+            safety check -r requirements.txt --json --output safety-report.json || true
+          else
+            pip freeze | safety check --stdin --json --output safety-report.json || true
+          fi
+
+      - name: Enforce Infrastructure Misconfiguration Audit via Trivy Config Scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          hide-progress: true
+          format: 'table'
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Archive Enterprise Security Audit Artifacts
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: ceopro-security-compliance-reports
+          path: |
+            audit-report.json
+            safety-report.json
 
       - name: Enforce Strict Linting Standards
         run: |
@@ -34,7 +68,7 @@ jobs:
           flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
   build-scan-and-push:
-    needs: code-security-and-lint
+    needs: enterprise-security-audit
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code Repository Cluster
