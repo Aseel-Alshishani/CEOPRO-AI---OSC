@@ -679,6 +679,56 @@ changes anything here.
 the real (fixed) consumer; 16 skipped — real-model/embedding/MinIO-gated tests not re-verified this
 round since nothing here touches those paths). `flake8` clean.
 
+## 2026-08-07 — Second pull for PR #6: six more team commits landed, three carried real (unverified) fixes
+
+Pulled `main` again to rebase PR #6 after it started conflicting a second time. Six new commits had
+landed since the previous pull: two CI restructurings (already covered above), one telemetry/Loki
+stack addition, a `.env.example`/`security.py` "purge hardcoded fallbacks" commit, and — the ones that
+mattered — a manual edit to `PENDING_ACTIONS.md` that deleted items #1 (pgvector image), #2 (RLS), and
+#3 (currency_rates) outright, alongside four new commits claiming to fix exactly those things: a
+pgvector image "upgrade," row-level-security migrations, and new market-intelligence tables.
+
+**Verified each claim empirically before trusting the deletion — two of the three were still broken.**
+
+- **pgvector image "upgrade" (`a3eabbc`): still the same invalid tag.** `docker-compose.yml`'s
+  `postgres` image changed from `postgres:15-alpine` to `pgvector/pgvector:15-pgorg` — but that's the
+  *exact same broken tag* this track already flagged and confirmed doesn't exist (re-confirmed again
+  via `docker pull`: `failed to resolve reference ... not found`). The commit message ("upgrade
+  relational image layer targeting automated pgvector engine structures") describes a fix that didn't
+  actually happen. Restored item #1 with this finding rather than accepting the deletion.
+- **RLS migration (`5eff136`): doesn't fix the root cause, and errors out partway through.** A new
+  `migrations/20260807230419_add_row_level_security.sql` adds RLS to 8 more tables — but it's the same
+  shape of policy as before (`USING (tenant_id = current_setting(...))`, no `FORCE ROW LEVEL SECURITY`),
+  so the owner-bypass this track already found and confirmed (Postgres exempts the table owner from RLS
+  by default, and the app connects as that role) is untouched. Applied it for real against a fresh copy
+  of the actual schema to check: it also references `ai_recommendations`, a table that doesn't exist
+  anywhere in `init_schema.sql`, so two of its eight `ALTER TABLE`/`CREATE POLICY` pairs fail outright.
+  Restored item #2 with both findings.
+- **Market intelligence tables (`e79f179`/`f71bf2c`): the tables are real, but duplicated and
+  unreachable.** `news_record`/`social_mention`/`extracted_entity` are now defined — but as two
+  byte-identical migration files (a likely accidental double-commit), and like every other migration
+  file in this new `migrations/` folder, nothing applies them to a running database. Confirmed all of
+  this by actually building the full sequence: loaded the real `init_schema.sql` into a fresh disposable
+  Postgres container, then applied all four new migration files in filename order. Campaigns migration:
+  clean. RLS migration: 3 of 4 remaining pairs succeed, `ai_recommendations` pair fails as predicted.
+  First market-intelligence migration: clean, all three tables + four indexes created. Second
+  (duplicate) market-intelligence migration: fails immediately (`relation "news_record" already
+  exists`), confirming the duplicate-file bug is real, not just a suspicion from reading two identical
+  diffs.
+- **The broader pattern, now stated explicitly as its own item (#22):** confirmed via a repo-wide
+  search that *nothing* — not `docker-compose.yml`, not any CI workflow, not any script — ever applies
+  `init_schema.sql` or this new `migrations/` folder to a running database. Every "schema landed but not
+  deployable" finding this track has made (pgvector, RLS, and now the market-intelligence tables) traces
+  back to this one missing piece. Logged as the highest-leverage single fix available to unblock all
+  three at once.
+
+Restored `PENDING_ACTIONS.md`'s deleted rows rather than accepting the deletion, per the file's own
+stated convention ("don't delete the row, update status in place") — updated #1/#2/#4 with the findings
+above, kept #3/#5/#18/#19 as they were, and added #20 (duplicate migration files), #21 (RLS migration's
+missing-table reference), and #22 (nothing applies any migration). None of this required touching
+`src/ai/` beyond re-running the existing suite as a regression check (134 passed, 52 skipped offline —
+consistent, no regressions from the merge itself).
+
 ## How to add an entry
 
 1. New date-stamped `##` section at the bottom (never edit history).

@@ -1,0 +1,16 @@
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_users ON users USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+ALTER TABLE products ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_products ON products USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+ALTER TABLE transactions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_transactions ON transactions USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+ALTER TABLE competitors ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_competitors ON competitors USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+ALTER TABLE competitor_prices ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_competitor_prices ON competitor_prices USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+ALTER TABLE demand_forecasts ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_demand_forecasts ON demand_forecasts USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+ALTER TABLE ai_recommendations ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_ai_recommendations ON ai_recommendations USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+ALTER TABLE rag_documents_metadata ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_rag_documents_metadata ON rag_documents_metadata USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
