@@ -13,9 +13,8 @@ def test_insufficient_data_reports_building_status():
 
 
 def test_sufficient_data_reports_ok_status():
-    long_history = pd.DataFrame(
-        {"date": pd.date_range("2026-01-01", periods=cold_start.MIN_HISTORY_DAYS), "quantity": range(cold_start.MIN_HISTORY_DAYS)}
-    )
+    n_days = cold_start.MIN_HISTORY_DAYS
+    long_history = pd.DataFrame({"date": pd.date_range("2026-01-01", periods=n_days), "quantity": range(n_days)})
     result = cold_start.assess(long_history)
     assert result.sufficient is True
     assert result.confidence_status == "OK"

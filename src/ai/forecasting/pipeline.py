@@ -64,10 +64,12 @@ def _recursive_xgboost_forecast(
         predictions.append(next_prediction)
 
         next_date = working["date"].iloc[-1] + timedelta(days=1)
-        working = pd.concat(
-            [working, pd.DataFrame([{"date": next_date, "quantity": next_prediction, "avg_unit_price": working["avg_unit_price"].iloc[-1]}])],
-            ignore_index=True,
-        )
+        next_row = {
+            "date": next_date,
+            "quantity": next_prediction,
+            "avg_unit_price": working["avg_unit_price"].iloc[-1],
+        }
+        working = pd.concat([working, pd.DataFrame([next_row])], ignore_index=True)
 
     return np.array(predictions)
 
@@ -99,21 +101,26 @@ def run_forecast(conn, tenant_id: str, product_id: str, horizon_days: int = 7) -
     metrics = None
     trained_model_version_str = None
 
+    min_rows_for_validation = MIN_TRAIN_SIZE_FOR_VALIDATION + cold_start.MIN_VALIDATION_FOLDS
     feature_frame = build_feature_frame(daily, current_price, current_stock)
-    can_validate = sufficiency.sufficient and len(feature_frame) >= MIN_TRAIN_SIZE_FOR_VALIDATION + cold_start.MIN_VALIDATION_FOLDS
+    can_validate = sufficiency.sufficient and len(feature_frame) >= min_rows_for_validation
 
     if can_validate:
         validation = walk_forward_validate(feature_frame, MIN_TRAIN_SIZE_FOR_VALIDATION, cold_start.MIN_VALIDATION_FOLDS)
 
         baseline_val_predictions = {}
+        splits = expanding_window_splits(len(feature_frame), MIN_TRAIN_SIZE_FOR_VALIDATION, cold_start.MIN_VALIDATION_FOLDS)
         for name in baselines.BASELINE_FUNCTIONS:
             in_sample = baselines.baseline_in_sample_predictions(feature_frame["quantity"], name)
-            splits = expanding_window_splits(len(feature_frame), MIN_TRAIN_SIZE_FOR_VALIDATION, cold_start.MIN_VALIDATION_FOLDS)
             aligned = [in_sample[val_idx[0] - 1] for _, val_idx in splits if val_idx[0] - 1 < len(in_sample)]
             baseline_val_predictions[name] = aligned
 
-        comparison = evaluation.compare_to_baselines(validation["predictions"], validation["actuals"], baseline_val_predictions)
-        mase_value = evaluation.mase(validation["actuals"], validation["predictions"], validation["training_series"])
+        comparison = evaluation.compare_to_baselines(
+            validation["predictions"], validation["actuals"], baseline_val_predictions
+        )
+        mase_value = evaluation.mase(
+            validation["actuals"], validation["predictions"], validation["training_series"]
+        )
 
         metrics = {
             "mae": evaluation.mae(validation["actuals"], validation["predictions"]),
@@ -139,11 +146,13 @@ def run_forecast(conn, tenant_id: str, product_id: str, horizon_days: int = 7) -
 
     if chosen_source == "xgboost":
         spread = max(metrics["rmse"], 1.0)
-        confidence_score = round(max(0.3, min(0.95, 1 - min(metrics["mase"], 1.0))), 2) if metrics["mase"] == metrics["mase"] else 0.5
+        mase_is_valid = metrics["mase"] == metrics["mase"]  # False for NaN
+        confidence_score = round(max(0.3, min(0.95, 1 - min(metrics["mase"], 1.0))), 2) if mase_is_valid else 0.5
+        baseline_summary = ", ".join(f"{k}={v:.2f}" for k, v in metrics["baseline_scores"].items() if k != "model")
         explanation = (
             f"XGBoost forecast (trained {trained_model_version_str}) outperformed all baselines "
-            f"({', '.join(f'{k}={v:.2f}' for k, v in metrics['baseline_scores']['scores'].items())}) "
-            f"over {metrics['n_folds']} walk-forward validation folds (MAE={metrics['mae']:.2f}, MASE={metrics['mase']:.2f})."
+            f"({baseline_summary}) over {metrics['n_folds']} walk-forward validation folds "
+            f"(MAE={metrics['mae']:.2f}, MASE={metrics['mase']:.2f})."
         )
     else:
         recent_std = float(history.tail(14).std()) if len(history) > 1 else 0.0
@@ -175,7 +184,10 @@ def run_forecast(conn, tenant_id: str, product_id: str, horizon_days: int = 7) -
     )
 
     conn.commit()
-    logger.info(f"Forecast written tenant={tenant_id} product={product_id} source={chosen_source} forecast_id={demand_forecasts_id}")
+    logger.info(
+        f"Forecast written tenant={tenant_id} product={product_id} "
+        f"source={chosen_source} forecast_id={demand_forecasts_id}"
+    )
 
     return {
         "status": "OK",

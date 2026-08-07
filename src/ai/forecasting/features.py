@@ -6,13 +6,16 @@ Pure functions - no I/O - so they're independently unit-testable.
 
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 LAG_DAYS = (1, 7, 14)
 ROLLING_WINDOWS = (7, 14)
 
 
-def build_feature_frame(daily: pd.DataFrame, current_price: Optional[float] = None, current_stock: Optional[float] = None) -> pd.DataFrame:
+def build_feature_frame(
+    daily: pd.DataFrame, current_price: Optional[float] = None, current_stock: Optional[float] = None
+) -> pd.DataFrame:
     """
     `daily` must have columns [date, quantity, avg_unit_price], sorted ascending
     with no gaps (see data_access.load_daily_demand). Returns a frame with the
@@ -34,7 +37,7 @@ def build_feature_frame(daily: pd.DataFrame, current_price: Optional[float] = No
     frame["is_weekend"] = frame["day_of_week"].isin([4, 5]).astype(int)  # Fri/Sat weekend (spec targets MENA/Africa)
 
     frame["unit_price"] = frame["avg_unit_price"] if current_price is None else frame["avg_unit_price"].fillna(current_price)
-    frame["current_stock"] = current_stock if current_stock is not None else pd.NA
+    frame["current_stock"] = current_stock if current_stock is not None else np.nan
 
     feature_columns = (
         [f"lag_{lag}" for lag in LAG_DAYS]
