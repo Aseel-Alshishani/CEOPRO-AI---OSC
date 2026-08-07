@@ -386,6 +386,146 @@ Orange infra confirmation (#13, deferred).
 `currency_rates` into pricing, building the sentiment classifier now that `reviews`/`sentiment_results`
 exist) is real future work, not done here, since this was a status check, not a build round.
 
+## 2026-08-07 — Fixed real conflicts from the team's schema update; PR #2 confirmed merged
+
+Since the last entry, PR #2 was merged into `main` (2026-08-07 16:04 UTC, merge commit `d908fd3`) — all
+of `src/ai/` is now on `main`. Went looking for bugs/conflicts the team's schema update (previous
+entry) might have introduced against our existing queries, rather than assuming the additive-looking
+columns were harmless.
+
+**Found real ones**: the schema update added `products.deleted_at` (soft-delete) and
+`competitors.is_active`, with partial indexes on both (`WHERE deleted_at IS NULL`,
+`WHERE is_active = TRUE`) signaling the intended query pattern. None of our existing `SELECT` queries
+against `products`/`competitors` filtered on either column, meaning a soft-deleted product or a
+deactivated competitor would silently still show up in forecasting context, price recommendations, and
+NER catalog matching — not a crash, a quiet correctness bug that would only surface as "why is this
+deleted product still being forecasted" days later.
+
+Fixed in four queries across three modules:
+- `forecasting/data_access.py::load_product_context` — added `AND p.deleted_at IS NULL`.
+- `pricing/data_access.py::load_own_product` — added `AND deleted_at IS NULL`.
+- `pricing/data_access.py::load_competitor_prices` — joined to `competitors` and added
+  `AND c.is_active = TRUE` (a stale price from a since-deactivated competitor shouldn't influence a
+  live recommendation).
+- `extraction/data_access.py::load_known_product_names` / `load_known_competitor_names` — added the
+  same two filters respectively.
+
+Verified against the real, current schema (not the version this module was originally tested
+against) — reloaded `init_schema.sql` from `main` into a disposable Postgres and confirmed all 20
+non-pgvector tables still create cleanly (the `rag_document_chunks`/`vector` failure from the previous
+entry is isolated to that one table; everything else is unaffected). Added 5 regression tests (one per
+fixed query) that soft-delete/deactivate a row mid-test and assert it's excluded — all pass, and the
+full existing suite (136 tests) still passes unchanged against the new schema, confirming nothing else
+broke.
+
+**Infra fixes skipped this round on request** (`docker-compose.yml`'s Postgres image not being
+pgvector-enabled, item #17; the broken `watchdog.py` syntax, item #16) — started drafting both (image
+swap to `pgvector/pgvector:pg15`, confirmed it pulls and would resolve #17) but was asked to leave
+infra files alone for now. Both remain open in `PENDING_ACTIONS.md`, unstarted.
+
+**Full suite: 141 tests** (5 new regression tests added). Verified three ways: no live infra (104
+pass, 37 skip), Postgres up (121 pass, 20 skip). `flake8` clean. This work is on branch
+`claude/ai-schema-conflict-fixes` (off latest `main`, since PR #2 already merged) — opened as
+[PR #3](https://github.com/Huda-Hassouneh/CEOPRO-AI/pull/3).
+
+## 2026-08-07 — Exhaustive line-by-line audit of every module against the live schema; 3 more real bugs found
+
+Asked to "track every line and every output" and check for any other issues, on top of the schema-
+conflict fixes above (same PR #3 branch, not a new one — still under review). Re-read every source
+file in `forecasting/`, `pricing/`, `rag/`, and `extraction/` fresh against the current, real schema
+(quoted in full at the top of this entry's investigation, not from memory), rather than assuming the
+earlier fixes covered everything.
+
+**`forecasting/`, `pricing/`, `rag/`**: no new bugs found. Re-verified every query against every
+table it touches (`transactions`, `inventory`, `competitor_prices`, `evidence_records`,
+`demand_forecasts`, `recommendation_outcomes`, `model_versions`, `rag_documents_metadata` — all
+unchanged by the schema update) and re-checked edge cases in `baselines.py`, `model.py`,
+`recommendation.py`, `guardrails.py`, `hybrid_retrieval.py`, `faiss_index.py`. All sound.
+
+**`extraction/regex_patterns.py`: three more real bugs**, found by testing actual behavior against
+realistic text, not by reading the regex and assuming it was right:
+
+1. **`_DISCOUNT_PATTERN` was case-sensitive in a way that missed common phrasing.** It hardcoded
+   `off|discount|OFF|DISCOUNT` instead of using `re.IGNORECASE`, so title-case marketing text like
+   "Big 30% Off Sale" or "Get 15% Discount today" silently didn't match, while `"20% off"` and
+   `"20% OFF"` did. Fixed: single case-insensitive pattern.
+
+2. **`INVOICE_ID`/`ORDER_ID` extraction had a false-positive bug serious enough to matter**: with
+   `re.IGNORECASE`, the shorter alternative in `(?:INV|INVOICE)` matched as a *prefix of the plain
+   English word* "invoice" itself, with the rest of the word ("oice") captured as a fake ID. Verified:
+   `extract_invoice_id("Please send me my invoice")` returned an `INVOICE_ID` entity with value
+   `"oice"`. Root cause was two compounding issues: (a) alternation tried the short form before the
+   long form, and (b) the ID-capture group (`[A-Z0-9]{3,}`) matched *any* 3+-letter word
+   case-insensitively, not just genuine ID-shaped tokens — so even a correctly-scoped label match
+   would go on to capture the next ordinary word ("amount", "today") as if it were the ID. Fixed both:
+   reordered the alternation (`INVOICE|INV`), and required the captured group to contain at least one
+   digit (`(?=[A-Z0-9]*\d)[A-Z0-9]{3,}`) — real IDs always have one, ordinary words never do. Verified
+   the fix doesn't regress genuine matches (`"INV-20458"`, `"INV20458"`, `"ORDER: ORD99231"`, etc.)
+   and does suppress the false positives (`"invoice"`, `"invoicing"`, `"the order was placed"`,
+   `"in order to proceed"`, `"reorder level"`, `"disorder"`).
+
+3. **`extract_money` only handled amount-then-code ("18.00 JOD"), never code-then-amount
+   ("JOD 18.00")** — a gap, not a false positive, but a real one: code-before-amount is at least as
+   common a convention as code-after for the MENA currencies this platform targets (spec §9), and
+   `"JOD 18.00"`, `"SAR 500"`, `"AED 1,250.00"` all silently extracted nothing. Added a second pattern
+   for the code-before ordering.
+
+All three were confirmed with direct interpreter testing before touching the source (not assumed from
+reading the regex), and each got a targeted regression test rather than a vague "does it work now"
+check: 7 new tests (1 case-insensitivity, 2 false-positive-suppression, 2 real-match-preservation,
+2 code-before-amount).
+
+**Full suite: 148 tests, run with every live service up simultaneously** (Postgres with the real
+current schema, Redis, MinIO, and the real embedding model, all at once for the first time this
+session) — confirms nothing regressed across the whole module set together, not just per-module in
+isolation. `flake8` clean. All still on `claude/ai-schema-conflict-fixes` / PR #3.
+
+**A near-miss worth recording**: continuing the audit, `grep`ing for `sklearn` imports across
+`src/ai/` found none, so `scikit-learn` in `requirements.txt` looked like dead weight and was
+removed. Before committing that, tested it properly instead of trusting the grep result alone: built
+a throwaway venv with only `xgboost`/`numpy`/`pandas` (no scikit-learn) and tried the exact
+`XGBRegressor` construction+fit+predict call `model.py` uses. It failed:
+`ImportError: sklearn needs to be installed in order to use this module` — `xgboost`'s
+sklearn-compatible wrapper (`XGBRegressor`, which `model.py` uses directly) hard-requires
+`scikit-learn` internally, even though nothing in this codebase ever writes `import sklearn` itself.
+Reverted the removal immediately and added a comment in `requirements.txt` explaining why the
+dependency is there, so this exact mistake doesn't get made again by grep-based reasoning alone. This
+is exactly the kind of thing "looks unused" static analysis misses and only running the actual code
+catches — logged as a reminder to verify empirically before removing anything that looks unused,
+not just this once.
+
+## 2026-08-07 — Pushed, pulled for team updates, reanalyzed schema/data-flow/integration
+
+Confirmed everything from the prior entries was committed and pushed (clean working tree, branch in
+sync with `origin/claude/ai-schema-conflict-fixes`). Fetched `main`: one new commit since last check
+(`a58ce6f`, another `watchdog.py` update), no schema/`docker-compose.yml`/data-contract changes
+(confirmed with an explicit diff — empty).
+
+**`watchdog.py` is still broken, but with a different specific defect than previously logged.** The
+commit that fixed the PowerShell-heredoc-wrapper bug (`PENDING_ACTIONS.md` #16, previous entries)
+also deleted the module docstring's opening and closing `"""` lines in the same edit, leaving the
+docstring text as bare top-level statements — still a `SyntaxError`, confirmed with `ast.parse()` on
+the actual git blob piped directly via `git show | python3 -c '...'`, not a local copy (a first
+attempt via `Out-File -Encoding utf8` falsely reported a BOM error that traced back to PowerShell's
+`utf8` encoding adding its own BOM to the local copy, not something present in the real file — worth
+noting as its own small lesson: verify against the real git blob, not a roundtripped local copy, when
+the exact bytes matter). Updated `PENDING_ACTIONS.md` #16 with the corrected diagnosis. Also confirmed
+via `git merge-tree` that this change doesn't conflict with PR #3 — clean auto-merge, watchdog.py
+untouched on this branch.
+
+**Practical impact check, not just "is it broken"**: read `staging-deployment.yml` again — the
+`python watchdog.py` step is in a job that only runs after a `Dockerfile.ai` build step, and
+`Dockerfile.ai` still doesn't exist anywhere in the repo (`PENDING_ACTIONS.md` #8). So the pipeline
+fails there first; `watchdog.py`'s brokenness is currently unreachable in CI, not currently blocking
+anything of ours. Still logged as open rather than downgraded, since it becomes live the moment #8 is
+fixed.
+
+**Schema/data-flow/integration reanalysis**: since the schema is unchanged since the previous full
+audit, re-ran the full offline test suite (111 passed, 37 skipped — consistent with the last known
+count) as a sanity check rather than repeating the entire live-infra verification from scratch, since
+nothing that verification depends on had changed. No new issues found in `forecasting/`, `pricing/`,
+`rag/`, or `extraction/`.
+
 ## How to add an entry
 
 1. New date-stamped `##` section at the bottom (never edit history).

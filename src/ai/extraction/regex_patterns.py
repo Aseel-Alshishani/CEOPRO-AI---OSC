@@ -46,16 +46,32 @@ class ExtractedEntity:
 
 
 _CURRENCY_CODE_PATTERN = re.compile(r"\b(" + "|".join(re.escape(c) for c in CURRENCY_CODES) + r")\b")
-_MONEY_WITH_CODE_PATTERN = re.compile(
+_MONEY_WITH_CODE_AFTER_PATTERN = re.compile(
     r"(?P<amount>\d{1,3}(?:,\d{3})*(?:\.\d+)?)\s*(?P<currency>" + "|".join(re.escape(c) for c in CURRENCY_CODES) + r")\b"
+)
+# Currency-code-before-amount ("JOD 18.00", "SAR 500") is at least as common
+# as code-after ("18.00 JOD") for the MENA currencies this platform targets
+# (spec S9) - both orderings need their own pattern, not just one.
+_MONEY_WITH_CODE_BEFORE_PATTERN = re.compile(
+    r"\b(?P<currency>" + "|".join(re.escape(c) for c in CURRENCY_CODES) + r")\s+(?P<amount>\d{1,3}(?:,\d{3})*(?:\.\d+)?)\b"
 )
 _MONEY_WITH_SYMBOL_PATTERN = re.compile(r"(?P<symbol>[$€£])\s?(?P<amount>\d{1,3}(?:,\d{3})*(?:\.\d+)?)")
 _PERCENT_PATTERN = re.compile(r"\b(\d{1,3}(?:\.\d+)?)\s?%")
-_DISCOUNT_PATTERN = re.compile(r"(\d{1,3}(?:\.\d+)?)\s?%\s*(?:off|discount|OFF|DISCOUNT)|discount of (\d{1,3}(?:\.\d+)?)\s?%")
+_DISCOUNT_PATTERN = re.compile(
+    r"(\d{1,3}(?:\.\d+)?)\s?%\s*(?:off|discount)|discount of (\d{1,3}(?:\.\d+)?)\s?%", re.IGNORECASE
+)
 _EMAIL_PATTERN = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
 _PHONE_PATTERN = re.compile(r"(?<!\w)(\+?\d{1,3}[\s.-]?)?(\(?\d{2,4}\)?[\s.-]?){2,4}\d{2,4}(?!\w)")
-_INVOICE_ID_PATTERN = re.compile(r"\b(?:INV|INVOICE)\s?[-#]?\s?([A-Z0-9]{3,})\b", re.IGNORECASE)
-_ORDER_ID_PATTERN = re.compile(r"\b(?:ORD|ORDER)\s?[-#]?\s?([A-Z0-9]{3,})\b", re.IGNORECASE)
+#   1. Alternation order matters here: with IGNORECASE, "INV" (tried first)
+#      matches as a prefix of the plain word "invoice" itself ("INV" + "oice"
+#      as the "ID"), so the longer alternative must come first.
+#   2. The ID group requires a digit ((?=[A-Z0-9]*\d)) - without it,
+#      [A-Z0-9]{3,} case-insensitively matches any ordinary 3+ letter word
+#      ("amount", "today", ...) as a fake ID. Real invoice/order IDs always
+#      contain a digit; both bugs were confirmed via ast-level testing, not
+#      assumed - see AI_PROGRESS.md.
+_INVOICE_ID_PATTERN = re.compile(r"\b(?:INVOICE|INV)\s?[-#]?\s?((?=[A-Z0-9]*\d)[A-Z0-9]{3,})\b", re.IGNORECASE)
+_ORDER_ID_PATTERN = re.compile(r"\b(?:ORDER|ORD)\s?[-#]?\s?((?=[A-Z0-9]*\d)[A-Z0-9]{3,})\b", re.IGNORECASE)
 _DATE_ISO_PATTERN = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 _DATE_SLASH_PATTERN = re.compile(r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b")
 
@@ -72,13 +88,14 @@ def _matches_to_entities(pattern: re.Pattern, text: str, entity_type: str, group
 
 def extract_money(text: str) -> List[ExtractedEntity]:
     entities = []
-    for m in _MONEY_WITH_CODE_PATTERN.finditer(text):
-        entities.append(
-            ExtractedEntity(
-                entity_type="MONEY", text=m.group(0), start=m.start(), end=m.end(),
-                normalized_value=f"{m.group('amount').replace(',', '')} {m.group('currency')}",
+    for pattern in (_MONEY_WITH_CODE_AFTER_PATTERN, _MONEY_WITH_CODE_BEFORE_PATTERN):
+        for m in pattern.finditer(text):
+            entities.append(
+                ExtractedEntity(
+                    entity_type="MONEY", text=m.group(0), start=m.start(), end=m.end(),
+                    normalized_value=f"{m.group('amount').replace(',', '')} {m.group('currency')}",
+                )
             )
-        )
     for m in _MONEY_WITH_SYMBOL_PATTERN.finditer(text):
         currency = CURRENCY_SYMBOLS.get(m.group("symbol"), m.group("symbol"))
         entities.append(

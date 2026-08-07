@@ -58,7 +58,7 @@ def load_product_context(conn: "psycopg2.extensions.connection", tenant_id: str,
         SELECT p.current_price, p.category, i.current_stock
         FROM products p
         LEFT JOIN inventory i ON i.product_id = p.product_id
-        WHERE p.tenant_id = %s AND p.product_id = %s;
+        WHERE p.tenant_id = %s AND p.product_id = %s AND p.deleted_at IS NULL;
     """
     with conn.cursor() as cursor:
         cursor.execute(query, (tenant_id, product_id))
