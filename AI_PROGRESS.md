@@ -480,6 +480,20 @@ current schema, Redis, MinIO, and the real embedding model, all at once for the 
 session) — confirms nothing regressed across the whole module set together, not just per-module in
 isolation. `flake8` clean. All still on `claude/ai-schema-conflict-fixes` / PR #3.
 
+**A near-miss worth recording**: continuing the audit, `grep`ing for `sklearn` imports across
+`src/ai/` found none, so `scikit-learn` in `requirements.txt` looked like dead weight and was
+removed. Before committing that, tested it properly instead of trusting the grep result alone: built
+a throwaway venv with only `xgboost`/`numpy`/`pandas` (no scikit-learn) and tried the exact
+`XGBRegressor` construction+fit+predict call `model.py` uses. It failed:
+`ImportError: sklearn needs to be installed in order to use this module` — `xgboost`'s
+sklearn-compatible wrapper (`XGBRegressor`, which `model.py` uses directly) hard-requires
+`scikit-learn` internally, even though nothing in this codebase ever writes `import sklearn` itself.
+Reverted the removal immediately and added a comment in `requirements.txt` explaining why the
+dependency is there, so this exact mistake doesn't get made again by grep-based reasoning alone. This
+is exactly the kind of thing "looks unused" static analysis misses and only running the actual code
+catches — logged as a reminder to verify empirically before removing anything that looks unused,
+not just this once.
+
 ## How to add an entry
 
 1. New date-stamped `##` section at the bottom (never edit history).

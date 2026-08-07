@@ -1,6 +1,9 @@
 xgboost>=2.0,<3.0
 pandas>=2.0,<3.0
 numpy>=1.24,<2.0
+# Never import sklearn directly - this is here because xgboost.XGBRegressor
+# (model.py) hard-requires it internally and raises ImportError without it,
+# confirmed by testing in a venv with xgboost but no scikit-learn installed.
 scikit-learn>=1.3,<2.0
 psycopg2-binary>=2.9,<3.0
 redis>=5.0,<6.0
