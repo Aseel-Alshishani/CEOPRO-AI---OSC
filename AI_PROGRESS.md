@@ -339,6 +339,53 @@ here) and — more fundamentally — there's no source text to run it on yet (`r
 without any real text to validate it against would be much lower-confidence work than everything
 built so far, all of which was verified against real data through real infra.
 
+## 2026-08-07 — Rechecked repo for team changes; two schema blockers closed, two new issues found
+
+`git fetch` showed 2 new commits on `main` since last checked (`537a207` watchdog.py, `01d7d43`
+init_schema.sql), from the infra track — not this branch. Audited both directly rather than assuming
+from the commit messages. No AI/ML code was written this round; investigation and doc updates only.
+
+**Schema update (`01d7d43`) — good news first:**
+- `currency_rates` table landed. **`PENDING_ACTIONS.md` #3 closed.** Cross-currency pricing is now
+  schema-buildable (not yet wired into `src/ai/pricing/`, which still only does same-currency
+  comparison — that's now unblocked future work, not a pending action anymore).
+- `reviews` and `sentiment_results` tables landed. **`PENDING_ACTIONS.md` #4 partially closed** —
+  sentiment analysis (spec §16) is now fully unblocked: there's source text to run it on and a table
+  to write results to. `extracted_entity`, `news_record`, `social_mention` are still missing, so NER
+  persistence and news/social-based intelligence remain blocked.
+- `pgvector` extension + a `rag_document_chunks` table (with a `VECTOR(1024)` column) were added,
+  aimed at `PENDING_ACTIONS.md` #1. **Tested this directly rather than trusting it works**: loaded
+  the new `init_schema.sql` against a real, plain `postgres:15-alpine` container (the same image
+  `docker-compose.yml` still references) and got `ERROR: extension "vector" is not available` —
+  `docker-compose.yml`'s postgres service was never switched to a pgvector-enabled image (e.g.
+  `pgvector/pgvector:pg15`). The schema change alone doesn't make item #1 deployable; logged as new
+  item #17. `products`/`competitors` also gained audit columns (`source`, `created_by_user_id`,
+  soft-delete on products, `is_active` on competitors) and a new `product_price_history` table —
+  none of these change anything in `src/ai/`, no action needed.
+
+**watchdog.py update (`537a207`) — mixed:**
+- The hardcoded Postgres password fallback flagged in `PENDING_ACTIONS.md` #10 is fixed —
+  `DATABASE_URL` is now required, no embedded credential. **#10 closed.**
+- But the same commit broke the file: it literally committed the PowerShell here-string wrapper used
+  to write it (`@'` as line 1, `'@ | Out-File -FilePath ... -Encoding utf8` as the last line) instead
+  of just the Python content inside it. Confirmed with `ast.parse()`:
+  `SyntaxError: invalid non-printable character U+FEFF` at line 1 — the file won't import or run at
+  all. This isn't cosmetic: `.github/workflows/staging-deployment.yml` runs
+  `python src/infrastructure/monitoring/watchdog.py` directly as a deploy step. Logged as new item
+  #16.
+
+**Still open, unchanged**: RLS (#2), `ai_consumer.py` ownership question (#6), `model_versions.artifact_path`
+(#7), `Dockerfile.ai`/CI reference (#8), root `requirements.txt` (#9), `products.cost` (#14), PDF/DOCX
+extraction (#15, self-flagged), the three missing AI planning docs (#11), `MASTER_SPEC_v4.md`/
+`AI_PLAN_AND_CONTRACT_UPDATES.md` still unmerged to `main` (#12, `noorhassouneh-patch-1` unchanged),
+Orange infra confirmation (#13, deferred).
+
+**PR #2** (this branch's work) is still open on GitHub, mergeable, no reviews or comments yet.
+
+**No implementation started this round** per instruction — newly-unblocked work (wiring
+`currency_rates` into pricing, building the sentiment classifier now that `reviews`/`sentiment_results`
+exist) is real future work, not done here, since this was a status check, not a build round.
+
 ## How to add an entry
 
 1. New date-stamped `##` section at the bottom (never edit history).
