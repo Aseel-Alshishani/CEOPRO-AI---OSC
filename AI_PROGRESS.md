@@ -22,8 +22,8 @@ in [`PENDING_ACTIONS.md`](PENDING_ACTIONS.md) so it stays visible without diggin
 | Phase 2 — Demand Intelligence (§18, §23, §25) | `src/ai/forecasting/` | 🟢 Built, tested (unit + integration) | Baselines, XGBoost + walk-forward validation, cold-start policy, evidence writers, Redis consumer. See entries below. |
 | Phase 3 — RAG Chatbot (§21) | — | ⚪ Not started | Blocked: needs pgvector + `knowledge_chunks` (infra-owned blocking ask, see `AI_PLAN_AND_CONTRACT_UPDATES.md`). |
 | Phase 4 — Market Intelligence (§15, §16, §17) | — | ⚪ Not started | Blocked: schema has no `reviews`/`news_record`/`social_mention`/`extracted_entity`/`sentiment_result` tables yet. |
-| Phase 5 — Price Intelligence (§19) | — | ⚪ Not started | `competitors`/`competitor_prices`/`recommendation_outcomes` tables exist, but `competitor_prices` is empty (no scraper/ingestion running yet) — nothing to build against. |
-| Phase 6 — Competitor Ranking (§20) | — | ⚪ Not started | Same data gap as Phase 5. |
+| Phase 5 — Price Intelligence (§19) | `src/ai/pricing/` | 🟢 Built, tested (unit + integration) | Product matching, rule-based recommendation, price-change guardrail, evidence + recommendation_outcomes writers. See entry below. Margin guardrails are weaker than spec'd — `products` has no cost column (`PENDING_ACTIONS.md` #14). Real competitor price data still doesn't exist (`PENDING_ACTIONS.md` #5), so the cold-start/UNKNOWN path is what actually runs today, same as Phase 2. |
+| Phase 6 — Competitor Ranking (§20) | — | ⚪ Not started | Same data gap as Phase 5 (`PENDING_ACTIONS.md` #5). |
 
 Legend: 🟢 built and tested · 🟡 in progress · 🟠 blocked on another team · ⚪ not started.
 
@@ -150,6 +150,60 @@ only Redis available (no `AI_TEST_DATABASE_URL`), 36 pass and 5 skip; with neith
 set, all 26 offline tests pass and the remaining 15 skip cleanly. `flake8` clean on both checks.
 
 No further known test gaps in `src/ai/forecasting/` as of this entry.
+
+## 2026-08-07 — Phase 5 Price Intelligence built and tested: `src/ai/pricing/`
+
+Built `src/ai/pricing/` (spec §19 Price Intelligence, relevant parts of §20's normalization
+principle, §23 cold-start, §24 recommendation outcomes) against the existing `products`,
+`competitors`, `competitor_prices`, `evidence_records`, and `recommendation_outcomes` tables — again
+no schema changes, no infra/UI files touched.
+
+- `matching.py` — name-similarity product matching (`difflib.SequenceMatcher`, no new dependency).
+  `competitor_prices.product_name_captured` is free text with no `product_id` FK, so matching to our
+  own catalog can't be a join; spec §37's cold-start guidance for product matching ("use rules and
+  fuzzy matching with more manual confirmation") calls for exactly this, with a conservative default
+  threshold (0.82) that trades recall for not silently comparing different products.
+- `data_access.py` — reads own product price/currency, and competitor prices filtered to
+  same-currency, `ALLOWED` source status, exact data, and a freshness window (default 30 days).
+  Cross-currency comparison is explicitly out of scope here — it needs `currency_rates`
+  (`PENDING_ACTIONS.md` #3), which doesn't exist. This only ever does spec §19's "LOCAL MARKET
+  COMPARISON", never "CROSS-COUNTRY COMPARISON".
+- `recommendation.py` — transparent, rule-based market-average comparison (raise/lower/hold),
+  deliberately not a learned model: spec §19 says "Learned pricing must remain disabled until enough
+  historical price-change data exists," and `recommendation_outcomes` is currently empty, so there
+  is no such history yet.
+- `guardrails.py` — bounds how far a suggested price can move from the current price (default 15%).
+  **This is not the margin guardrail spec §19 also asks for** — that needs a cost/COGS basis, and
+  `products` has no cost column. Flagged as a new item, `PENDING_ACTIONS.md` #14.
+- `evidence.py` — reuses `insert_evidence_record` from `forecasting.evidence` directly rather than
+  duplicating it (spec §22: "one consistent evidence architecture," and the function was already
+  generic, not forecast-specific). Adds `insert_recommendation_outcome`, writing a
+  `recommendation_outcomes` row at recommendation time per spec §24 ("every recommendation must
+  create a RECOMMENDATION_OUTCOME record"), `action_taken` left at the table's `ignored` default
+  until a human actually acts on it.
+- `pipeline.py` — orchestrates: load own product → load same-currency competitor prices → match by
+  name → no matches: `UNKNOWN` evidence (cold-start path, same pattern as forecasting) → matches:
+  rule-based recommendation → guardrail → persist evidence + outcome row.
+
+**Testing:** 23 offline tests (matching, guardrails, recommendation math, pipeline with DB mocked
+out) plus 4 live-Postgres integration tests (real schema, seeded competitor prices, checks the
+`RECOMMENDATION`/`UNKNOWN` evidence category and the `recommendation_outcomes` row land correctly,
+including the `ignored` default). All 27 passed — no bugs found this time, unlike the forecasting
+module's first pass; the pattern established there (mocked unit tests + a real seeded database) may
+simply be catching more before code is even run for the first time.
+
+**Full combined suite verified**: 68 tests total (forecasting 41 + pricing 27). Ran three ways: no
+live-infra env vars (49 pass, 19 skip), Postgres only (58 pass, 10 skip — Redis-only tests skip), and
+both Postgres + Redis up (all 68 pass). `flake8` clean on both checks after fixing 9 line-length
+violations introduced by this addition.
+
+**Commit:** lands in the next commit after this entry.
+
+**Known limitations (flagged in `PENDING_ACTIONS.md`, not fixed here):**
+- Margin guardrails are weaker than spec'd — no `cost` column on `products` (#14).
+- Nothing to actually run this against yet — `competitor_prices` is empty; the cold-start/`UNKNOWN`
+  path is what executes today, same situation forecasting is in with real transaction volume (#5).
+- Cross-currency comparison isn't implemented — blocked on `currency_rates` (#3), same as before.
 
 ## How to add an entry
 

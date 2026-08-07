@@ -18,7 +18,7 @@ there's still a record of what happened. New items get added to the bottom of th
 | 2 | Add Row-Level Security policies for tenant isolation | Infra/DB | Defense-in-depth on multi-tenancy (spec §10, §37) | 🔴 Open |
 | 3 | Add `currency_rates` table | Infra/DB | Cross-currency pricing logic (spec §9, §19) | 🔴 Open |
 | 4 | `reviews`/`news_record`/`social_mention`/`extracted_entity`/`sentiment_result` tables don't exist | Infra/DB | Phase 4 Market Intelligence (NER, sentiment — spec §15, §16) | 🔴 Open |
-| 5 | No real competitor price data or scraper running (`competitor_prices` table exists but is empty) | AI Market Scraper Service owner (per `DATA_OWNERSHIP_AND_CONTRACTS.md`) | Phase 5 Price Intelligence, Phase 6 Competitor Ranking (spec §19, §20) | 🔴 Open |
+| 5 | No real competitor price data or scraper running (`competitor_prices` table exists but is empty) | AI Market Scraper Service owner (per `DATA_OWNERSHIP_AND_CONTRACTS.md`) | Phase 6 Competitor Ranking (spec §20); Phase 5 Price Intelligence logic is now built and tested against seeded data (see `AI_PROGRESS.md`, `src/ai/pricing/`) but has nothing real to run against | 🟡 Open — AI/ML side is ready and waiting; the scraper itself is still the blocker |
 
 ## Needs a decision (not blocking yet, but ambiguous/contested)
 
@@ -28,6 +28,7 @@ there's still a record of what happened. New items get added to the bottom of th
 | 7 | `model_versions` has no `artifact_path` column, so trained model binaries can't be pointed at their MinIO location (`ceopro-ai-artifacts`) yet | Backend/DB | Small, additive schema change (`ALTER TABLE model_versions ADD COLUMN artifact_path VARCHAR(500);`) — low risk, just needs someone to run it | 🟡 Open — small ask, easy to unblock |
 | 8 | `.github/workflows/staging-deployment.yml` builds/deploys `Dockerfile.ai` and a `docker compose ... ai` service — **neither exists anywhere in the repo, on any branch** | Infra/DevOps | CI will fail the first time this workflow actually runs end-to-end (currently only triggers on push to `main`) | 🟠 Open — discovered during this session's repo audit, not caused by AI/ML work |
 | 9 | No root-level `requirements.txt`, but `Dockerfile.backend` runs `pip install -r requirements.txt` | Backend/Infra | Backend Docker build is currently broken | 🟠 Open — discovered during this session's repo audit |
+| 14 | `products` table has no `cost`/COGS column | Backend/DB | Spec §19 calls for margin-based pricing guardrails; without a cost basis, `src/ai/pricing/guardrails.py` can only bound *how much a suggested price can move*, not *whether it stays profitable* — a materially weaker guardrail | 🟡 Open — small ask (`ALTER TABLE products ADD COLUMN cost NUMERIC(10, 2);`), same shape as item #7 |
 
 ## Security
 

@@ -3,7 +3,8 @@
 Owned by the AI/ML engineering track. Scope is limited to what this team owns per
 [`src/infrastructure/DATA_OWNERSHIP_AND_CONTRACTS.md`](../infrastructure/DATA_OWNERSHIP_AND_CONTRACTS.md):
 reading business data written by other services, producing ML model outputs, and writing to the
-tables this track owns (`demand_forecasts`, `evidence_records`, `model_versions`).
+tables this track owns (`demand_forecasts`, `evidence_records`, `model_versions`,
+`recommendation_outcomes`).
 
 This directory intentionally does **not** touch:
 - `docker-compose.yml` / any `Dockerfile.*` — infra owns container/deployment wiring.
@@ -42,14 +43,42 @@ changes required.
 
 Runs CPU-only by design — no GPU dependency anywhere in this module.
 
-### Known upstream blockers (not fixed here — flagged for the relevant owning team)
+### `pricing/` — Phase 5, Price Intelligence (spec §19, §23, §24)
 
-- No real transaction volume yet (`mocks/sales_transactions_mock.csv` has 3 rows) — the cold-start
-  path is exercised by default until real data lands.
+Implements same-currency competitor price comparison against the existing `products` /
+`competitors` / `competitor_prices` / `evidence_records` / `recommendation_outcomes` tables — no
+schema changes required.
+
+- `matching.py` — name-similarity matching (`difflib`) between our `products.product_name` and
+  `competitor_prices.product_name_captured` (free text, no FK between them).
+- `data_access.py` — reads own product price/currency and same-currency, `ALLOWED`-source, exact,
+  fresh (default 30-day window) competitor prices.
+- `recommendation.py` — transparent rule-based raise/lower/hold recommendation vs. the matched
+  competitors' market average. Not a learned model — spec §19 requires enough price-change history
+  to exist first, and there isn't any yet.
+- `guardrails.py` — bounds how far a suggested price can move from the current price (default 15%).
+  **Not** a margin guardrail — `products` has no cost column (see blockers below).
+- `evidence.py` — reuses `forecasting.evidence.insert_evidence_record` (spec §22: one shared evidence
+  architecture, not reimplemented per module) and adds `insert_recommendation_outcome`.
+- `pipeline.py` — orchestrates: load own product → load same-currency competitor prices → match by
+  name → no matches: `UNKNOWN` evidence (cold-start) → matches: recommendation → guardrail → persist.
+
+Only handles spec §19's "LOCAL MARKET COMPARISON" (same currency) — "CROSS-COUNTRY COMPARISON" needs
+`currency_rates`, which doesn't exist (see blockers below). CPU-only, no ML model at all currently —
+purely rule-based per spec's explicit cold-start requirement for pricing.
+
+### Known upstream blockers (not fixed here — flagged in [`PENDING_ACTIONS.md`](../../PENDING_ACTIONS.md))
+
+- No real transaction volume yet (`mocks/sales_transactions_mock.csv` has 3 rows) — `forecasting/`'s
+  cold-start path is exercised by default until real data lands.
+- No real competitor price data or scraper running — `competitor_prices` exists but is empty, so
+  `pricing/`'s `UNKNOWN`-evidence path is what actually executes today.
 - `model_versions` has no `artifact_path` column yet, so trained model binaries aren't persisted to
   MinIO (`ceopro-ai-artifacts`) in this first version — metrics/version metadata are still recorded
   in `model_versions` on every training run. Wiring artifact storage is a follow-up once that column
   exists.
+- `products` has no `cost` column, so `pricing/guardrails.py` can only bound price-change magnitude,
+  not enforce a real margin floor as spec §19 also asks for.
 - pgvector / `knowledge_chunks` / Row-Level Security / `currency_rates` remain infra-owned blocking
   asks for later phases (RAG chatbot, cross-currency pricing) — out of scope for this module.
 
@@ -68,12 +97,13 @@ pip install -r src/ai/requirements.txt
 pytest src/ai/tests
 ```
 
-`test_integration_db.py` additionally validates the raw SQL in `data_access.py`/`evidence.py`
-against a real PostgreSQL instance running the actual `init_schema.sql` — column types, JSONB
-casts, FK constraints, and INT rounding on `demand_forecasts.expected_demand` are things a mocked
-connection can't catch. It's skipped unless `AI_TEST_DATABASE_URL` is set, so it never runs in CI or
-blocks anyone without Docker available. Point it at a disposable database — the test inserts and
-rolls back rows, but don't aim it at a shared dev database:
+`test_integration_db.py` (forecasting) and `test_pricing_integration_db.py` (pricing) additionally
+validate the raw SQL in each module's `data_access.py`/`evidence.py` against a real PostgreSQL
+instance running the actual `init_schema.sql` — column types, JSONB casts, FK constraints, and INT
+rounding on `demand_forecasts.expected_demand` are things a mocked connection can't catch. Both are
+skipped unless `AI_TEST_DATABASE_URL` is set, so neither ever runs in CI or blocks anyone without
+Docker available. Point it at a disposable database — the tests insert and roll back rows, but don't
+aim it at a shared dev database:
 
 ```bash
 docker run -d --name ceopro_postgres_aitest -e POSTGRES_USER=ceopro_admin \
