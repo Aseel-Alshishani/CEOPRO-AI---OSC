@@ -337,3 +337,80 @@ CREATE INDEX idx_audit_logs_tenant ON audit_logs(tenant_id);
 -- Adjust "lists" based on expected row count once you have real data volume.
 -- CREATE INDEX idx_rag_chunks_embedding ON rag_document_chunks
 --     USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+
+-- ==============================================================================
+-- CEOPRO AI - ENTERPRISE MULTI-TENANCY ROW-LEVEL SECURITY (RLS) POLICIES
+-- ==============================================================================
+
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE products ENABLE ROW LEVEL SECURITY;
+ALTER TABLE product_price_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE transactions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inventory ENABLE ROW LEVEL SECURITY;
+ALTER TABLE competitors ENABLE ROW LEVEL SECURITY;
+ALTER TABLE competitor_prices ENABLE ROW LEVEL SECURITY;
+ALTER TABLE reviews ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sentiment_results ENABLE ROW LEVEL SECURITY;
+ALTER TABLE demand_forecasts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE evidence_records ENABLE ROW LEVEL SECURITY;
+ALTER TABLE recommendation_outcomes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE rag_documents_metadata ENABLE ROW LEVEL SECURITY;
+ALTER TABLE rag_document_chunks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE import_staging_rows ENABLE ROW LEVEL SECURITY;
+ALTER TABLE data_sources ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ingestion_jobs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY tenant_isolation_users_policy ON users 
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation_products_policy ON products 
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation_history_policy ON product_price_history 
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation_transactions_policy ON transactions 
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation_inventory_policy ON inventory 
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation_competitors_policy ON competitors 
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation_cprices_policy ON competitor_prices 
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation_reviews_policy ON reviews 
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation_sentiment_policy ON sentiment_results 
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation_forecasts_policy ON demand_forecasts 
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation_evidence_policy ON evidence_records 
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation_outcomes_policy ON recommendation_outcomes 
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation_rag_metadata_policy ON rag_documents_metadata 
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation_rag_chunks_policy ON rag_document_chunks 
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation_staging_policy ON import_staging_rows 
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation_sources_policy ON data_sources 
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation_jobs_policy ON ingestion_jobs 
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation_audit_policy ON audit_logs 
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);

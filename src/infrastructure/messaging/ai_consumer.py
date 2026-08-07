@@ -1,18 +1,13 @@
-"""
-CEOPRO AI - Ingestion Pipeline Consumer.
-Consumes raw market intelligence events and records pipeline execution in the audit log.
-"""
-
-import logging
+﻿import logging
 import os
 import time
+import json
 from typing import Optional
 import redis
 import psycopg2
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("CEOPRO_AI_CONSUMER_CORE")
-
 
 class AIStreamConsumer:
     def __init__(self, host: Optional[str] = None, port: Optional[int] = None, group_id: str = "ceopro-ai-nlp-extractors"):
@@ -22,10 +17,8 @@ class AIStreamConsumer:
         self.stream_key = "market.intelligence.raw"
         self.consumer_name = f"ai-core-node-{os.getpid()}"
 
-        self.db_url = os.getenv("DATABASE_URL")
-        if not self.db_url:
-            raise RuntimeError("DATABASE_URL environment variable is not set.")
-
+        self.db_url = self._resolve_db_url()
+        
         try:
             self.client = redis.Redis(host=self.host, port=self.port, decode_responses=True)
             try:
@@ -37,19 +30,37 @@ class AIStreamConsumer:
             logger.critical(f"Initialization failure: {str(e)}")
             raise e
 
-    def _write_ingestion_audit_log(self, conn, tenant_id: str, product_name: str, price: float) -> None:
-        """
-        Records that a raw market record was ingested. This is a pipeline execution
-        record, not a verified business fact, so it belongs in audit_logs rather
-        than evidence_records.
-        """
+    def _resolve_db_url(self) -> str:
+        url = os.getenv("DATABASE_URL")
+        if not url:
+            user = os.getenv("POSTGRES_USER", "ceopro_admin")
+            pwd = os.getenv("POSTGRES_PASSWORD", "SecurePassword2026")
+            host = os.getenv("POSTGRES_HOST", "localhost")
+            port = os.getenv("POSTGRES_PORT", "5432")
+            db = os.getenv("POSTGRES_DB", "ceopro_platform")
+            url = f"postgresql://{user}:{pwd}@{host}:{port}/{db}"
+        return url
+
+    def _write_ingestion_staging_record(self, conn, tenant_id: str, product_name: str, price: float, currency: str) -> None:
+        raw_payload = {
+            "product_name_captured": product_name,
+            "price_found": price,
+            "currency": currency,
+            "ingested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        }
         with conn.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT INTO audit_logs (tenant_id, action, entity_type, details)
-                VALUES (%s, 'market_record_ingested', 'competitor_price', %s::jsonb);
+                INSERT INTO import_staging_rows (job_id, tenant_id, row_number, raw_data, validation_status)
+                VALUES (
+                    '00000000-0000-0000-0000-000000000000'::uuid, 
+                    %s::uuid, 
+                    1, 
+                    %s::jsonb, 
+                    'needs_review'
+                );
                 """,
-                (tenant_id, f'{{"product_name": "{product_name}", "price": {price}}}'),
+                (tenant_id, json.dumps(raw_payload)),
             )
 
     def execute_pipeline_listener(self):
@@ -77,12 +88,13 @@ class AIStreamConsumer:
                             tenant_id = payload.get("tenant_id")
                             product_name = payload.get("product_name_captured", "unknown")
                             price_found = float(payload.get("price_found", 0.0))
+                            currency = payload.get("currency", "JOD")
 
-                            self._write_ingestion_audit_log(db_connection, tenant_id, product_name, price_found)
+                            self._write_ingestion_staging_record(db_connection, tenant_id, product_name, price_found, currency)
 
                             db_connection.commit()
                             self.client.xack(self.stream_key, self.group_id, message_id)
-                            logger.info(f"Message {message_id} processed and acknowledged.")
+                            logger.info(f"Message {message_id} processed and staged successfully.")
 
                         except Exception as inner_process_err:
                             if db_connection:
