@@ -494,6 +494,38 @@ is exactly the kind of thing "looks unused" static analysis misses and only runn
 catches — logged as a reminder to verify empirically before removing anything that looks unused,
 not just this once.
 
+## 2026-08-07 — Pushed, pulled for team updates, reanalyzed schema/data-flow/integration
+
+Confirmed everything from the prior entries was committed and pushed (clean working tree, branch in
+sync with `origin/claude/ai-schema-conflict-fixes`). Fetched `main`: one new commit since last check
+(`a58ce6f`, another `watchdog.py` update), no schema/`docker-compose.yml`/data-contract changes
+(confirmed with an explicit diff — empty).
+
+**`watchdog.py` is still broken, but with a different specific defect than previously logged.** The
+commit that fixed the PowerShell-heredoc-wrapper bug (`PENDING_ACTIONS.md` #16, previous entries)
+also deleted the module docstring's opening and closing `"""` lines in the same edit, leaving the
+docstring text as bare top-level statements — still a `SyntaxError`, confirmed with `ast.parse()` on
+the actual git blob piped directly via `git show | python3 -c '...'`, not a local copy (a first
+attempt via `Out-File -Encoding utf8` falsely reported a BOM error that traced back to PowerShell's
+`utf8` encoding adding its own BOM to the local copy, not something present in the real file — worth
+noting as its own small lesson: verify against the real git blob, not a roundtripped local copy, when
+the exact bytes matter). Updated `PENDING_ACTIONS.md` #16 with the corrected diagnosis. Also confirmed
+via `git merge-tree` that this change doesn't conflict with PR #3 — clean auto-merge, watchdog.py
+untouched on this branch.
+
+**Practical impact check, not just "is it broken"**: read `staging-deployment.yml` again — the
+`python watchdog.py` step is in a job that only runs after a `Dockerfile.ai` build step, and
+`Dockerfile.ai` still doesn't exist anywhere in the repo (`PENDING_ACTIONS.md` #8). So the pipeline
+fails there first; `watchdog.py`'s brokenness is currently unreachable in CI, not currently blocking
+anything of ours. Still logged as open rather than downgraded, since it becomes live the moment #8 is
+fixed.
+
+**Schema/data-flow/integration reanalysis**: since the schema is unchanged since the previous full
+audit, re-ran the full offline test suite (111 passed, 37 skipped — consistent with the last known
+count) as a sanity check rather than repeating the entire live-infra verification from scratch, since
+nothing that verification depends on had changed. No new issues found in `forecasting/`, `pricing/`,
+`rag/`, or `extraction/`.
+
 ## How to add an entry
 
 1. New date-stamped `##` section at the bottom (never edit history).
