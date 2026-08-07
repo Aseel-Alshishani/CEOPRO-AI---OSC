@@ -1,0 +1,116 @@
+﻿name: CEOPRO AI - Advanced GitOps Production-Grade Deployment Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+
+jobs:
+  code-security-and-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code Repository Cluster
+        uses: actions/checkout@v3
+
+      - name: Initialize Enterprise Python Environment
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Hardened Testing Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 pytest
+
+      - name: Enforce Strict Linting Standards
+        run: |
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+  build-scan-and-push:
+    needs: code-security-and-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code Repository Cluster
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx Orchestrator
+        uses: docker/setup-buildx-action@v2
+
+      - name: Log In into Production Registry Container
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+
+      - name: Compile Backend Container Layer
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./src/infrastructure/Dockerfile.backend
+          load: true
+          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/ceopro-backend:staging
+
+      - name: Audit Backend Image Container via Trivy Scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ secrets.DOCKER_HUB_USERNAME }}/ceopro-backend:staging
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Compile Accelerated AI Service Container
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./src/infrastructure/Dockerfile.ai
+          load: true
+          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/ceopro-ai-service:staging
+
+      - name: Audit AI Service Image Container via Trivy Scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ secrets.DOCKER_HUB_USERNAME }}/ceopro-ai-service:staging
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Dispatch Safe Containers to Remote Production Registry
+        run: |
+          docker push ${{ secrets.DOCKER_HUB_USERNAME }}/ceopro-backend:staging
+          docker push ${{ secrets.DOCKER_HUB_USERNAME }}/ceopro-ai-service:staging
+
+  immutable-staging-delivery:
+    needs: build-scan-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code Repository Cluster
+        uses: actions/checkout@v3
+
+      - name: Dispatch Secure Deployment Payload via SSH Gate
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.STAGING_SERVER_IP }}
+          username: ${{ secrets.STAGING_SERVER_USER }}
+          key: ${{ secrets.STAGING_SERVER_SSH_KEY }}
+          port: 22
+          script: |
+            cd /opt/ceopro-infra/staging
+            docker compose pull backend ai
+            docker compose up -d --no-deps backend ai
+            docker exec -i ceopro_postgres psql -U ceopro_admin -d ceopro_platform < src/infrastructure/database/init_schema.sql
+            python src/infrastructure/check_connectivity.py
+            python src/infrastructure/monitoring/watchdog.py
+            python src/infrastructure/database/backup_verifier.py
+            docker system prune -f --volumes
+            docker compose ps
