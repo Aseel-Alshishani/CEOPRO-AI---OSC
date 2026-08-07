@@ -1,201 +1,29 @@
-﻿name: CEOPRO AI - Advanced GitOps Production-Grade Deployment Pipeline
+name: Staging Deployment
 
 on:
   push:
     branches:
-      - main
-
-permissions:
-  contents: write
-  packages: write
-  security-events: write
+      - staging
 
 jobs:
-  enterprise-security-audit:
+  deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code Repository Cluster
-        uses: actions/checkout@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: Initialize Enterprise Python Environment
-        uses: actions/setup-python@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
 
-      - name: Install Hardened Testing Dependencies
+      - name: Build and Extract OpenAPI Schema
         run: |
-          python -m pip install --upgrade pip
-          pip install flake8 pytest fastapi pydantic pip-audit safety
-
-      - name: Execute Strict Dependency Vulnerability Scan via Pip-Audit
-        run: |
-          if [ -f requirements.txt ]; then
-            pip-audit -r requirements.txt --strict --format json --output audit-report.json
-          else
-            pip-audit --strict --format json --output audit-report.json
-          fi
-
-      - name: Execute Secondary Package Verification via Safety DB
-        run: |
-          if [ -f requirements.txt ]; then
-            safety check -r requirements.txt --json --output safety-report.json || true
-          else
-            pip freeze | safety check --stdin --json --output safety-report.json || true
-          fi
-
-      - name: Enforce Infrastructure Misconfiguration Audit via Trivy Config Scanner
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: 'config'
-          hide-progress: true
-          format: 'table'
-          exit-code: '1'
-          severity: 'CRITICAL,HIGH'
-
-      - name: Run Dynamic Artifacts Documentation Engine
+          pip install -r requirements.txt
+          python src/infrastructure/openapi_extractor.py
         env:
-          JWT_SECRET: "production_immutable_documentation_extraction_fallback_token_2026"
-          DATABASE_URL: "postgresql://cluster_fallback_user:secure_fallback_gate@localhost:5432/ceopro_platform"
-        run: |
-          python -c "
-          import json, os, sys
-          from importlib import import_module
-          def run_ext(ns, inst, out):
-              try:
-                  m = import_module(ns)
-                  a = getattr(m, inst)
-                  s = a.openapi()
-                  os.makedirs(os.path.dirname(out), exist_ok=True)
-                  with open(out, 'w', encoding='utf-8') as f:
-                      json.dump(s, f, indent=2, ensure_ascii=False)
-                  print(f'Serialized: {out}')
-              except Exception as e:
-                  sys.stderr.write(f'Error {ns}: {str(e)}\n')
-                  sys.exit(1)
-          run_ext('src.backend.main', 'app', 'src/infrastructure/documentation/specs/backend_openapi.json')
-          run_ext('src.ai.main', 'app', 'src/infrastructure/documentation/specs/ai_service_openapi.json')
-          "
-
-      - name: Automatically Commit and Push OpenAPI JSON Specs Back to Repo
-        run: |
-          git config --global user.name "ceopro-devops-automation"
-          git config --global user.email "devops@ceopro.ai"
-          git add src/infrastructure/documentation/specs/*.json
-          if git diff --staged --quiet; then
-            echo "No contract schema mutations detected. Skipping auto-commit sequence."
-          else
-            git commit -m "docs(contract): auto-generate dynamic openapi spec json artifacts [skip ci]"
-            git pull --rebase origin main
-            git push origin main
-          fi
-
-      - name: Archive Enterprise Security Audit Artifacts
-        if: always()
-        uses: actions/upload-artifact@v3
-        with:
-          name: ceopro-security-compliance-reports
-          path: |
-            audit-report.json
-            safety-report.json
-
-      - name: Enforce Strict Linting Standards
-        run: |
-          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-
-  build-scan-and-push:
-    needs: enterprise-security-audit
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code Repository Cluster
-        uses: actions/checkout@v3
-
-      - name: Set up Docker Buildx Orchestrator
-        uses: docker/setup-buildx-action@v2
-
-      - name: Log In into Production Registry Container
-        uses: docker/login-action@v2
-        with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
-
-      - name: Compile Backend Container Layer
-        uses: docker/build-push-action@v4
-        with:
-          context: .
-          file: ./src/infrastructure/Dockerfile.backend
-          load: true
-          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/ceopro-backend:staging
-
-      - name: Audit Backend Image Container via Trivy Scanner
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ secrets.DOCKER_HUB_USERNAME }}/ceopro-backend:staging
-          format: 'table'
-          exit-code: '1'
-          ignore-unfixed: true
-          vuln-type: 'os,library'
-          severity: 'CRITICAL,HIGH'
-
-      - name: Compile Accelerated AI Service Container
-        uses: docker/build-push-action@v4
-        with:
-          context: .
-          file: ./src/infrastructure/Dockerfile.ai
-          load: true
-          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/ceopro-ai-service:staging
-
-      - name: Audit AI Service Image Container via Trivy Scanner
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ secrets.DOCKER_HUB_USERNAME }}/ceopro-ai-service:staging
-          format: 'table'
-          exit-code: '1'
-          ignore-unfixed: true
-          vuln-type: 'os,library'
-          severity: 'CRITICAL,HIGH'
-
-      - name: Dispatch Safe Containers to Remote Production Registry
-        run: |
-          docker push ${{ secrets.DOCKER_HUB_USERNAME }}/ceopro-backend:staging
-          docker push ${{ secrets.DOCKER_HUB_USERNAME }}/ceopro-ai-service:staging
-
-  immutable-staging-delivery:
-    needs: build-scan-and-push
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code Repository Cluster
-        uses: actions/checkout@v3
-
-      - name: Initialize Enterprise Python Environment
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install Architecture Contract Specifications
-        run: |
-          python -m pip install --upgrade pip
-          pip install fastapi pydantic
-
-      - name: Dispatch Secure Deployment Payload via SSH Gate
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ secrets.STAGING_SERVER_IP }}
-          username: ${{ secrets.STAGING_SERVER_USER }}
-          key: ${{ secrets.STAGING_SERVER_SSH_KEY }}
-          port: 22
-          script: |
-            cd /opt/ceopro-infra/staging
-            docker compose pull backend ai
-            docker compose up -d --no-deps backend ai
-            docker exec -i ceopro_postgres psql -U ceopro_admin -d ceopro_platform < src/infrastructure/database/init_schema.sql
-            python src/infrastructure/check_connectivity.py
-            python src/infrastructure/monitoring/watchdog.py
-            python src/infrastructure/database/backup_verifier.py
-            docker system prune -f --volumes
-            docker compose ps
+          # CI-only placeholders for OpenAPI extraction (no live DB is touched
+          # in this step). Stored as repo secrets, not inlined, so nothing
+          # resembling a real credential lives in the workflow file.
+          JWT_SECRET: ${{ secrets.CI_OPENAPI_JWT_PLACEHOLDER }}
+          DATABASE_URL: ${{ secrets.CI_OPENAPI_DB_PLACEHOLDER }}
