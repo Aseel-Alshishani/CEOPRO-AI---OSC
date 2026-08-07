@@ -526,53 +526,11 @@ count) as a sanity check rather than repeating the entire live-infra verificatio
 nothing that verification depends on had changed. No new issues found in `forecasting/`, `pricing/`,
 `rag/`, or `extraction/`.
 
-## 2026-08-07 — PR #3 merged; team landed RLS + pgvector image fix attempt + monitoring stack — our code confirmed unaffected, several infra issues found
-
-Fetched `main` again: PR #3 merged (confirmed via `git log` showing the merge commit, `src/ai/` now
-fully on `main`), plus 3 new infra commits the same session — telemetry/monitoring (Prometheus/
-Grafana), an attempted pgvector image fix, and (significantly) RLS policies actually implemented.
-Investigated each by reading the real diffs and testing directly, not by trusting commit messages —
-this repo's commit messages have not reliably matched their content this session.
-
-**The most important question: does RLS break our own shipped code?** Tested directly rather than
-reasoning about it: spun up a real `pgvector/pgvector:pg15` container, loaded the actual current
-schema (with RLS enabled), connected as `ceopro_admin` (the same role `.env.example` and all of this
-session's tests use), inserted two different tenants' data, and ran a query with **zero tenant
-filter**. It returned both tenants' rows. **Our code is unaffected — good** — but this also means
-**the RLS policies currently provide no actual protection**: PostgreSQL exempts the table owner from
-RLS by default, and the app connects as `ceopro_admin`, the very role that owns every table. The
-policy definitions and the `current_setting('app.current_tenant_id', ...)` session-variable plumbing
-look correctly designed; it's specifically the connecting-role setup that makes them inert. Logged as
-`PENDING_ACTIONS.md` #2's updated status, not a new item — same underlying ask, refined diagnosis.
-
-**Other findings, all in infra-owned files, none touched (per prior "infra is not our business"
-boundary), all logged in `PENDING_ACTIONS.md`:**
-- The pgvector image fix attempt (`postgres:15-alpine` → `pgvector/pgvector:15-pgorg`) used a tag
-  that doesn't exist — confirmed via `docker pull`: `not found`. The same commit also stripped every
-  `${POSTGRES_USER}`/`${MINIO_ROOT_USER}`/etc. variable substitution in `docker-compose.yml` down to
-  empty strings; a later commit in the same session restored those, but the invalid image tag is
-  still there, unfixed. This currently blocks `docker compose up` entirely, not just pgvector-specific
-  features (item #17, updated).
-- `ai_consumer.py` (infra's file) reintroduced the exact hardcoded-credential-fallback pattern that
-  was fixed in `watchdog.py` the same day — replacing a `raise RuntimeError` guard with a silent
-  fallback to a hardcoded password. The same change also inserts into `import_staging_rows` with a
-  hardcoded all-zeros `job_id`, which the current schema's foreign key to `ingestion_jobs` will very
-  likely reject (new item #18).
-- `staging-deployment.yml` gained a step with a hardcoded `JWT_SECRET`/`DATABASE_URL` directly in the
-  YAML (not using `${{ secrets.* }}` like the rest of the file) that also imports `src.backend.main`
-  and `src.ai.main` — neither exists anywhere in the repo, confirmed via `git ls-tree`, so the step
-  will always fail. Currently unreachable in practice (same reason as `watchdog.py`, #16: the pipeline
-  fails earlier at the missing `Dockerfile.ai` step, #8) but a landmine for later (new item #19).
-- `.env.example` wasn't updated for the new `GRAFANA_ADMIN_USER`/`GRAFANA_ADMIN_PASSWORD` vars
-  `docker-compose.yml` now references — minor, doesn't break anything, just undocumented (new item
-  #20).
-
-**Nothing in `src/ai/` needed a change this round** — every finding above is in infra-owned files.
-Full offline suite reconfirmed unaffected (111 passed, 37 skipped, same as before).
-
 ## 2026-08-07 — Cross-currency pricing wired into `src/ai/pricing/`
 
-`currency_rates` landed in the team's schema update (previous entry). Wired it in, deliberately
+`currency_rates` landed in the team's latest schema update (see the PR #4 branch's entry, currently
+under review, for the full investigation of that update — including the finding that RLS is enabled
+but currently ineffective, unrelated to this entry). Wired `currency_rates` in here, deliberately
 scoped narrowly given spec §19's explicit warning: "The system must NOT use a simple currency
 conversion as the only basis for a cross-country pricing recommendation."
 
