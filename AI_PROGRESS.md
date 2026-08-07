@@ -22,7 +22,7 @@ in [`PENDING_ACTIONS.md`](PENDING_ACTIONS.md) so it stays visible without diggin
 | Phase 2 — Demand Intelligence (§18, §23, §25) | `src/ai/forecasting/` | 🟢 Built, tested (unit + integration) | Baselines, XGBoost + walk-forward validation, cold-start policy, evidence writers, Redis consumer. See entries below. |
 | Phase 3 — RAG Chatbot (§21) | `src/ai/rag/` | 🟡 Hybrid (lexical + semantic) retrieval built/tested; chatbot itself not started | Document ingestion + BM25 + FAISS semantic retrieval + Reciprocal Rank Fusion, all against existing `rag_documents_metadata` + MinIO — none of it needs pgvector. Still missing: LLM reasoning step, chat history (needs a new table). A real fusion edge case found and documented (not fixed — inherent BM25 behavior on very short chunks). See entries below. |
 | Phase 4 — Market Intelligence (§15, §16, §17) | `src/ai/extraction/` | 🟡 Rule-based NER built/tested; sentiment + persistence not started | Regex extraction (MONEY/CURRENCY/PERCENT/DISCOUNT/EMAIL/PHONE/INVOICE_ID/ORDER_ID/DATE) + catalog matching (PRODUCT/COMPETITOR) built. No `extracted_entity` table to write results to yet; sentiment analysis and ORG/PERSON/GPE entity types not started (need a heavier pretrained model — deferred, see `AI_PROGRESS.md`'s compute-tier discussion). See entry below. |
-| Phase 5 — Price Intelligence (§19) | `src/ai/pricing/` | 🟢 Built, tested (unit + integration) | Product matching, rule-based recommendation, price-change guardrail, evidence + recommendation_outcomes writers. See entry below. Margin guardrails are weaker than spec'd — `products` has no cost column (`PENDING_ACTIONS.md` #14). Real competitor price data still doesn't exist (`PENDING_ACTIONS.md` #5), so the cold-start/UNKNOWN path is what actually runs today, same as Phase 2. |
+| Phase 5 — Price Intelligence (§9, §19) | `src/ai/pricing/` | 🟢 Built, tested (unit + integration) | Product matching, rule-based recommendation, price-change guardrail, evidence + recommendation_outcomes writers, plus traceable currency conversion (`currency.py`) surfacing cross-currency competitor prices as reference-only context. See entries below. Margin guardrails are weaker than spec'd — `products` has no cost column (`PENDING_ACTIONS.md` #14). Real competitor price data still doesn't exist (`PENDING_ACTIONS.md` #5), so the cold-start/UNKNOWN path is what actually runs today, same as Phase 2. |
 | Phase 6 — Competitor Ranking (§20) | — | ⚪ Not started | Same data gap as Phase 5 (`PENDING_ACTIONS.md` #5). |
 
 Legend: 🟢 built and tested · 🟡 in progress · 🟠 blocked on another team · ⚪ not started.
@@ -525,6 +525,47 @@ audit, re-ran the full offline test suite (111 passed, 37 skipped — consistent
 count) as a sanity check rather than repeating the entire live-infra verification from scratch, since
 nothing that verification depends on had changed. No new issues found in `forecasting/`, `pricing/`,
 `rag/`, or `extraction/`.
+
+## 2026-08-07 — Cross-currency pricing wired into `src/ai/pricing/`
+
+`currency_rates` landed in the team's latest schema update (see the PR #4 branch's entry, currently
+under review, for the full investigation of that update — including the finding that RLS is enabled
+but currently ineffective, unrelated to this entry). Wired `currency_rates` in here, deliberately
+scoped narrowly given spec §19's explicit warning: "The system must NOT use a simple currency
+conversion as the only basis for a cross-country pricing recommendation."
+
+- `currency.py` (new): `get_latest_rate()` and `convert()`, following spec §9's traceability
+  requirements exactly — every conversion carries its original amount/currency, the rate, its date,
+  and its source; returns `None` (not a guess) when no rate exists for that pair. Deliberately
+  doesn't invert rates (using a stored JOD→SAR rate to serve SAR→JOD) — that's an inference about
+  `currency_rates`' data this module has no basis to make.
+- `data_access.py`: added `load_cross_currency_competitor_prices()`, mirroring the existing
+  same-currency query but for every *other* currency — kept as a fully separate query/result set
+  from `load_competitor_prices()`, never merged.
+- `pipeline.py`: cross-currency matches, when any exist and convert successfully, are appended to
+  the evidence explanation as an explicitly-labeled reference-only note ("not used in this
+  recommendation, per policy"). `recommendation.py`'s market-average/action math is completely
+  untouched by this — it still only ever sees same-currency data. This is "LOCAL MARKET COMPARISON"
+  (spec §19) unchanged, plus a first step toward "CROSS-COUNTRY COMPARISON" as *context*, not the
+  full thing spec §19 describes (which also wants purchasing power, local taxes, import costs,
+  shipping — none of that is modeled here).
+
+**Testing found one bug — in my own test code, not in `currency.py`/`pipeline.py`.** The first
+integration-test pass failed with `UniqueViolation` on `currency_rates`' `(base_currency,
+target_currency, rate_date)` constraint. Root cause: `currency_rates` isn't tenant-scoped (unlike
+every other table this session's tests write to), so a `conn.commit()`'d row from one test run
+persists and collides with the next run of the same test — whereas tenant-scoped tables never
+collide because every test uses a fresh `uuid.uuid4()` tenant. Fixed by switching the test-seeding
+helper to `INSERT ... ON CONFLICT (...) DO UPDATE` (upsert) instead of plain `INSERT`, making the
+tests idempotent regardless of what a previous run left committed. Verified by running the suite
+twice in a row against the same live database without resetting it — both runs passed.
+
+**Full suite: 160 tests** (12 new: 6 offline `currency.py` unit tests, 3 mocked-DB pipeline tests for
+the reference-note behavior, 3 live-DB integration tests). Verified against the real, current schema
+using the *correct* pgvector image this time (`pgvector/pgvector:pg15`, not the broken tag on `main`
+right now) — loaded the full schema including RLS policies and pgvector cleanly. Ran the entire
+160-test suite with Postgres + Redis + MinIO + the real embedding model all up simultaneously: all
+pass. `flake8` clean.
 
 ## How to add an entry
 
