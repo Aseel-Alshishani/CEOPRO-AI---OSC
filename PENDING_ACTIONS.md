@@ -14,11 +14,8 @@ there's still a record of what happened. New items get added to the bottom of th
 
 | # | Item | Owner | Blocks | Status |
 |---|---|---|---|---|
-| 1 | Add `pgvector` extension + a chunk-storage table to schema | Infra/DB | Semantic (embedding/FAISS) retrieval for Phase 3 RAG Chatbot (spec §21) | 🟡 Schema landed 2026-08-07 (`rag_document_chunks` table with a `VECTOR(1024)` column, `CREATE EXTENSION vector`) — **but confirmed by direct test that it doesn't actually deploy**: `docker-compose.yml`'s `postgres` service still uses plain `postgres:15-alpine`, which doesn't ship the pgvector extension (`ERROR: extension "vector" is not available`, verified against a real container). See new item #17. Lexical (BM25) retrieval doesn't need any of this — already built/tested against existing tables. |
-| 2 | Add Row-Level Security policies for tenant isolation | Infra/DB | Defense-in-depth on multi-tenancy (spec §10, §37) | 🔴 Open — unchanged as of 2026-08-07's schema update |
-| 3 | Add `currency_rates` table | Infra/DB | Cross-currency pricing logic (spec §9, §19) | ✅ Resolved 2026-08-07 — table landed in `init_schema.sql`. Not yet wired into `src/ai/pricing/` (still same-currency only); that's now unblocked AI/ML work, not logged as a pending action anymore. |
-| 4 | `reviews`/`news_record`/`social_mention`/`extracted_entity`/`sentiment_results` tables don't exist | Infra/DB | NER persistence (spec §15) and sentiment analysis (spec §16) | 🟡 Partially resolved 2026-08-07 — `reviews` and `sentiment_results` both landed, which unblocks sentiment analysis entirely (source text + a place to write results). `extracted_entity`, `news_record`, `social_mention` are still missing, so NER persistence and news/social-based market intelligence remain blocked. |
-| 5 | No real competitor price data or scraper running (`competitor_prices` table exists but is empty) | AI Market Scraper Service owner (per `DATA_OWNERSHIP_AND_CONTRACTS.md`) | Phase 6 Competitor Ranking (spec §20); Phase 5 Price Intelligence logic is now built and tested against seeded data (see `AI_PROGRESS.md`, `src/ai/pricing/`) but has nothing real to run against | 🟡 Open — AI/ML side is ready and waiting; the scraper itself is still the blocker |
+
+| 4 | No real competitor price data or scraper running (`competitor_prices` table exists but is empty) | AI Market Scraper Service owner (per `DATA_OWNERSHIP_AND_CONTRACTS.md`) | Phase 6 Competitor Ranking (spec §20); Phase 5 Price Intelligence logic is now built and tested against seeded data (see `AI_PROGRESS.md`, `src/ai/pricing/`) but has nothing real to run against | 🟡 Open — AI/ML side is ready and waiting; the scraper itself is still the blocker |
 
 ## Needs a decision (not blocking yet, but ambiguous/contested)
 
