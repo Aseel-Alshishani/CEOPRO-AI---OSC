@@ -70,6 +70,32 @@ services:
       redis:
         condition: service_healthy
 
+  loki:
+    image: grafana/loki:2.9.0
+    container_name: ceopro_loki
+    mem_limit: 512m
+    volumes:
+      - ./src/infrastructure/monitoring/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki_data:/tmp/loki
+    command: -config.file=/etc/loki/loki-config.yml
+    ports:
+      - "3100:3100"
+    networks:
+      - ceopro_telemetry_net
+
+  promtail:
+    image: grafana/promtail:2.9.0
+    container_name: ceopro_promtail
+    mem_limit: 256m
+    volumes:
+      - ./src/infrastructure/monitoring/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: -config.file=/etc/promtail/promtail-config.yml
+    networks:
+      - ceopro_telemetry_net
+    depends_on:
+      - loki
+
   grafana:
     image: grafana/grafana:10.2.0
     container_name: ceopro_grafana
@@ -115,6 +141,7 @@ volumes:
   postgres_data:
   redis_data:
   prometheus_data:
+  loki_data:
   grafana_data:
   minio_data:
 
