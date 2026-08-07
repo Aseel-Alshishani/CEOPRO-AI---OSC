@@ -1,8 +1,14 @@
+import os
+
 import redis
 
 print(" Initializing CEOPRO AI Asynchronous Message Broker Topics...")
 try:
-    r = redis.Redis(host='localhost', port=6379, socket_connect_timeout=3)
+    r = redis.Redis(
+        host=os.getenv("REDIS_HOST", "localhost"),
+        port=int(os.getenv("REDIS_PORT", "6379")),
+        socket_connect_timeout=3,
+    )
     topics = [
         "ceopro:stream:data_raw_uploaded",
         "ceopro:stream:demand_forecast_requested",

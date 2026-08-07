@@ -1,6 +1,10 @@
 """
 CEOPRO AI - Dashboard Stream Consumer.
-Consumes processed market intelligence events and forwards them to the dashboard layer.
+Consumes processed market intelligence events. No dashboard/backend service
+exists yet to forward them to (PENDING_ACTIONS.md), so this currently only
+logs and acknowledges each message - a real dispatch step (e.g. writing to a
+cache the dashboard reads, or a websocket push) needs to land alongside
+whatever backend eventually owns the dashboard layer.
 """
 import logging
 import os
@@ -50,7 +54,9 @@ class ApplicationDashboardConsumer:
                     for message_id, payload in messages:
                         try:
                             tenant_id = payload.get("tenant_id")
-                            logger.info(f"Dispatched update for Tenant={tenant_id} StreamID={message_id}")
+                            logger.info(
+                                f"Acknowledged update for Tenant={tenant_id} StreamID={message_id} (no dispatch target yet)"
+                            )
                             self.client.xack(self.stream_key, self.group_id, message_id)
                         except Exception as dispatch_err:
                             logger.error(f"Dispatch failure on event {message_id}: {str(dispatch_err)}")

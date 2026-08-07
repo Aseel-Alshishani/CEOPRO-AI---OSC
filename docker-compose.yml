@@ -1,8 +1,6 @@
-version: '3.8'
-
 services:
   postgres:
-    image: pgvector/pgvector:15-pgorg
+    image: pgvector/pgvector:pg15
     container_name: ceopro_postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER}

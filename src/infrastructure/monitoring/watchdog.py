@@ -1,7 +1,7 @@
-
+"""
 CEOPRO AI - Automated Asynchronous Telemetry Watchdog Core.
 Executes non-blocking multi-threaded endpoint auditing loops.
-
+"""
 
 import json
 import logging
@@ -14,6 +14,7 @@ import redis
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(threadName)s: %(message)s")
 logger = logging.getLogger("CEOPRO_WATCHDOG")
+
 
 class InfrastructureWatchdog:
     def __init__(self):
@@ -32,8 +33,12 @@ class InfrastructureWatchdog:
             logger.error(f"[ALERT] Component={component} Type={alert_type} Details={details}")
             if not self.webhook_url:
                 return
+            timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
             payload = {
-                "text": f"[CEOPRO ALERT]\nComponent: {component}\nType: {alert_type}\nDetails: {details}\nTimestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                "text": (
+                    f"[CEOPRO ALERT]\nComponent: {component}\nType: {alert_type}\n"
+                    f"Details: {details}\nTimestamp: {timestamp}"
+                )
             }
             try:
                 req = urllib.request.Request(
@@ -107,7 +112,7 @@ class InfrastructureWatchdog:
         t2.join(timeout=5)
         logger.info("Health checks complete.")
 
+
 if __name__ == "__main__":
     watchdog = InfrastructureWatchdog()
     watchdog.run_checks()
-
