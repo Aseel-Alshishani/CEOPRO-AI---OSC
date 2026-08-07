@@ -21,8 +21,8 @@ in [`PENDING_ACTIONS.md`](PENDING_ACTIONS.md) so it stays visible without diggin
 |---|---|---|---|
 | Phase 2 — Demand Intelligence (§18, §23, §25) | `src/ai/forecasting/` | 🟢 Built, tested (unit + integration) | Baselines, XGBoost + walk-forward validation, cold-start policy, evidence writers, Redis consumer. See entries below. |
 | Phase 3 — RAG Chatbot (§21) | `src/ai/rag/` | 🟡 Hybrid (lexical + semantic) retrieval built/tested; chatbot itself not started | Document ingestion + BM25 + FAISS semantic retrieval + Reciprocal Rank Fusion, all against existing `rag_documents_metadata` + MinIO — none of it needs pgvector. Still missing: LLM reasoning step, chat history (needs a new table). A real fusion edge case found and documented (not fixed — inherent BM25 behavior on very short chunks). See entries below. |
-| Phase 4 — Market Intelligence (§15, §16, §17) | `src/ai/extraction/` | 🟡 Rule-based NER built/tested; sentiment + persistence not started | Regex extraction (MONEY/CURRENCY/PERCENT/DISCOUNT/EMAIL/PHONE/INVOICE_ID/ORDER_ID/DATE) + catalog matching (PRODUCT/COMPETITOR) built. No `extracted_entity` table to write results to yet; sentiment analysis and ORG/PERSON/GPE entity types not started (need a heavier pretrained model — deferred, see `AI_PROGRESS.md`'s compute-tier discussion). See entry below. |
-| Phase 5 — Price Intelligence (§19) | `src/ai/pricing/` | 🟢 Built, tested (unit + integration) | Product matching, rule-based recommendation, price-change guardrail, evidence + recommendation_outcomes writers. See entry below. Margin guardrails are weaker than spec'd — `products` has no cost column (`PENDING_ACTIONS.md` #14). Real competitor price data still doesn't exist (`PENDING_ACTIONS.md` #5), so the cold-start/UNKNOWN path is what actually runs today, same as Phase 2. |
+| Phase 4 — Market Intelligence (§15, §16, §17) | `src/ai/extraction/`, `src/ai/sentiment/` | 🟡 Rule-based NER + sentiment analysis built/tested; NER persistence + MPI (§17) not started | Regex extraction (MONEY/CURRENCY/PERCENT/DISCOUNT/EMAIL/PHONE/INVOICE_ID/ORDER_ID/DATE) + catalog matching (PRODUCT/COMPETITOR) built. No `extracted_entity` table to write results to yet; ORG/PERSON/GPE entity types not started. Sentiment analysis (`sentiment/`) built: XLM-RoBERTa-based classifier (`cardiffnlp/twitter-xlm-roberta-base-sentiment`), per-subject aggregation, LOW SAMPLE SIZE policy — `reviews` table is currently empty in prod, so the `UNKNOWN`-evidence path is what runs today. Market Perception Index (§17, combines sentiment + source reliability + recency + volume + entity relevance) not started. See entries below. |
+| Phase 5 — Price Intelligence (§9, §19) | `src/ai/pricing/` | 🟢 Built, tested (unit + integration) | Product matching, rule-based recommendation, price-change guardrail, evidence + recommendation_outcomes writers, plus traceable currency conversion (`currency.py`) surfacing cross-currency competitor prices as reference-only context (see [PR #5](https://github.com/Huda-Hassouneh/CEOPRO-AI/pull/5), not yet merged as of this entry). See entries below. Margin guardrails are weaker than spec'd — `products` has no cost column (`PENDING_ACTIONS.md` #14). Real competitor price data still doesn't exist (`PENDING_ACTIONS.md` #5), so the cold-start/UNKNOWN path is what actually runs today, same as Phase 2. |
 | Phase 6 — Competitor Ranking (§20) | — | ⚪ Not started | Same data gap as Phase 5 (`PENDING_ACTIONS.md` #5). |
 
 Legend: 🟢 built and tested · 🟡 in progress · 🟠 blocked on another team · ⚪ not started.
@@ -525,6 +525,122 @@ audit, re-ran the full offline test suite (111 passed, 37 skipped — consistent
 count) as a sanity check rather than repeating the entire live-infra verification from scratch, since
 nothing that verification depends on had changed. No new issues found in `forecasting/`, `pricing/`,
 `rag/`, or `extraction/`.
+
+## 2026-08-07 — Cross-currency pricing wired into `src/ai/pricing/`
+
+`currency_rates` landed in the team's latest schema update (see the PR #4 branch's entry, currently
+under review, for the full investigation of that update — including the finding that RLS is enabled
+but currently ineffective, unrelated to this entry). Wired `currency_rates` in here, deliberately
+scoped narrowly given spec §19's explicit warning: "The system must NOT use a simple currency
+conversion as the only basis for a cross-country pricing recommendation."
+
+- `currency.py` (new): `get_latest_rate()` and `convert()`, following spec §9's traceability
+  requirements exactly — every conversion carries its original amount/currency, the rate, its date,
+  and its source; returns `None` (not a guess) when no rate exists for that pair. Deliberately
+  doesn't invert rates (using a stored JOD→SAR rate to serve SAR→JOD) — that's an inference about
+  `currency_rates`' data this module has no basis to make.
+- `data_access.py`: added `load_cross_currency_competitor_prices()`, mirroring the existing
+  same-currency query but for every *other* currency — kept as a fully separate query/result set
+  from `load_competitor_prices()`, never merged.
+- `pipeline.py`: cross-currency matches, when any exist and convert successfully, are appended to
+  the evidence explanation as an explicitly-labeled reference-only note ("not used in this
+  recommendation, per policy"). `recommendation.py`'s market-average/action math is completely
+  untouched by this — it still only ever sees same-currency data. This is "LOCAL MARKET COMPARISON"
+  (spec §19) unchanged, plus a first step toward "CROSS-COUNTRY COMPARISON" as *context*, not the
+  full thing spec §19 describes (which also wants purchasing power, local taxes, import costs,
+  shipping — none of that is modeled here).
+
+**Testing found one bug — in my own test code, not in `currency.py`/`pipeline.py`.** The first
+integration-test pass failed with `UniqueViolation` on `currency_rates`' `(base_currency,
+target_currency, rate_date)` constraint. Root cause: `currency_rates` isn't tenant-scoped (unlike
+every other table this session's tests write to), so a `conn.commit()`'d row from one test run
+persists and collides with the next run of the same test — whereas tenant-scoped tables never
+collide because every test uses a fresh `uuid.uuid4()` tenant. Fixed by switching the test-seeding
+helper to `INSERT ... ON CONFLICT (...) DO UPDATE` (upsert) instead of plain `INSERT`, making the
+tests idempotent regardless of what a previous run left committed. Verified by running the suite
+twice in a row against the same live database without resetting it — both runs passed.
+
+**Full suite: 160 tests** (12 new: 6 offline `currency.py` unit tests, 3 mocked-DB pipeline tests for
+the reference-note behavior, 3 live-DB integration tests). Verified against the real, current schema
+using the *correct* pgvector image this time (`pgvector/pgvector:pg15`, not the broken tag on `main`
+right now) — loaded the full schema including RLS policies and pgvector cleanly. Ran the entire
+160-test suite with Postgres + Redis + MinIO + the real embedding model all up simultaneously: all
+pass. `flake8` clean.
+
+## 2026-08-07 — Phase 4 sentiment analysis built: `src/ai/sentiment/`
+
+Built the multilingual sentiment classification piece of spec §16 (Market Intelligence), now unblocked
+since the `reviews`/`sentiment_results` tables landed earlier this session (previously tracked as
+`PENDING_ACTIONS.md` #4).
+
+- **`model.py`** — wraps `cardiffnlp/twitter-xlm-roberta-base-sentiment`, a pretrained XLM-RoBERTa-based
+  3-class classifier, spec §16's stated model choice ("Possible model: XLM-RoBERTa-based sentiment
+  classifier"). Handles Arabic, English, and mixed content with no per-language routing — the whole
+  point of a multilingual model.
+- **A real ordering bug avoided by testing, not caught by inspection.** My first instinct was to
+  hardcode `{0: "negative", 1: "neutral", 2: "positive"}` since that's what I expected a standard
+  3-class sentiment head to use. Instead of assuming, I downloaded the real model and printed its
+  actual `config.id2label` before writing any label-mapping code — it *is* `{0: 'negative', 1:
+  'neutral', 2: 'positive'}` for this specific model, but there was no guarantee of that going in, and
+  a different checkpoint (or a future model swap via `SENTIMENT_MODEL`) could easily use a different
+  order. `model.py` reads `id2label` from the loaded model at runtime instead of hardcoding it,
+  specifically because this same track already shipped one ordering-assumption bug this session (the
+  NER regex alternation-order bug that made `INVOICE_ID` extraction return `"oice"`). Verified the
+  classifier itself on real (not synthetic) English and Arabic text, including code-switching-adjacent
+  cases: "This product is amazing, I love it!" → 94.8% positive; "خدمة سيئة جدا ولن أشتري مرة أخرى"
+  (very bad service, won't buy again) → 94.8% negative; "التوصيل كان سريعا وممتازا" (delivery was fast
+  and excellent) → 83.1% positive; a genuinely lukewarm English sentence → 53.0% neutral (correctly the
+  plurality class, not a coin-flip).
+- **`data_access.py`** — reads unanalyzed reviews (ALLOWED-source, non-empty text only, matching spec
+  §13's Collection Policy Engine that every other data_access.py in this track already respects), and
+  aggregates already-analyzed `sentiment_results` per subject (product/competitor/business-overall),
+  including the continuous sentiment score spec §16 explicitly allows: `avg(positive_probability) −
+  avg(negative_probability)`, weighted by each label group's count.
+- **`cold_start.py`** — spec §16, verbatim: "If a country has insufficient review data, the system
+  must display LOW SAMPLE SIZE" and "must not present a statistically weak result as a reliable market
+  conclusion." Applied per-subject rather than strictly per-country — `reviews` has no country column,
+  so a stricter per-country cut would need either a `products`-level country field that doesn't exist
+  yet or joining through `competitors.country_code` for competitor-subject reviews only; scoped to
+  what the current schema actually supports rather than half-implementing per-country splitting for
+  one subject type and not the others.
+- **`pipeline.py`** — deliberately two entry points instead of one: `classify_and_store_reviews()` is
+  bulk/background labeling (writes raw `sentiment_results` rows only, no evidence — an unanalyzed
+  review being classified isn't itself a conclusion surfaced to anyone); `get_subject_sentiment_summary()`
+  aggregates already-analyzed sentiment for one subject and is the only function that writes to
+  `evidence_records` (category `FACT`, or `UNKNOWN` for a subject with zero analyzed reviews) — this
+  split mirrors the "raw model artifact vs. user-facing evidence" separation already established in
+  `rag/` (embeddings aren't evidence-bearing; retrieval results are what's actually surfaced).
+
+**Testing.** 20 new tests: 3 offline `cold_start.py` tests, 6 offline `model.py` tests (mocking the
+transformer entirely — including one that deliberately puts "positive" at index 0 in a fake
+`id2label`, to prove `classify()` doesn't fall back to any hardcoded order even by accident), 5
+offline `pipeline.py` tests (data access/model/evidence all mocked), and 6 live-DB integration tests
+against a disposable `pgvector/pgvector:pg15` container running the real `init_schema.sql` — these
+patch `model.classify()` with a deterministic fake (the model's own correctness is what the opt-in
+real-model tests below cover; re-downloading/running a 1.1GB transformer for every DB test would be
+slow for no additional signal). Ran the live-DB suite twice in a row without resetting the database to
+confirm idempotency (fresh `uuid.uuid4()` tenant per test, same pattern already established for the
+pricing/forecasting integration tests) — both runs passed. Separately, ran the real, undownloaded
+model (`AI_TEST_SENTIMENT=1`) against `test_sentiment_model_real.py`'s 6 tests, including the Arabic
+cases above — all passed.
+
+**Full suite: 186 tests total** (160 previously + 26 new: 3 `cold_start.py` + 6 `model.py` + 5
+`pipeline.py` offline, 6 live-DB integration, 6 opt-in real-model). Ran the full offline + live-DB
+suite (`AI_TEST_DATABASE_URL` set, `AI_TEST_SENTIMENT` unset) twice to confirm no regressions from
+adding `transformers`/`sentencepiece`/`protobuf` to `requirements.txt`: 160 passed both times (20
+pre-existing tests needing MinIO/Redis/the real embedding model skipped, same as they'd skip without
+this change — not re-verified this round since nothing here touches those paths), 0 failed. `flake8`
+clean.
+
+`transformers`, `sentencepiece`, and `protobuf` added to `src/ai/requirements.txt` — `transformers`
+was already a transitive dependency via `sentence-transformers` but is now imported directly by
+`sentiment/model.py`; `sentencepiece`/`protobuf` are XLM-RoBERTa's slow-tokenizer requirements
+(`AutoTokenizer.from_pretrained` fails on this model architecture without them — found by testing, not
+by reading the model card).
+
+No event contract exists yet for triggering sentiment analysis on new reviews (checked
+`src/infrastructure/init_broker.py` — no `ceopro:stream:*` topic provisioned for it), so — same
+situation as `pricing/` — this is called directly rather than via a Redis consumer for now.
 
 ## How to add an entry
 

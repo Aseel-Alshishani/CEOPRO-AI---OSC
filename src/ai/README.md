@@ -4,7 +4,7 @@ Owned by the AI/ML engineering track. Scope is limited to what this team owns pe
 [`src/infrastructure/DATA_OWNERSHIP_AND_CONTRACTS.md`](../infrastructure/DATA_OWNERSHIP_AND_CONTRACTS.md):
 reading business data written by other services, producing ML model outputs, and writing to the
 tables this track owns (`demand_forecasts`, `evidence_records`, `model_versions`,
-`recommendation_outcomes`).
+`recommendation_outcomes`, `sentiment_results`).
 
 This directory intentionally does **not** touch:
 - `docker-compose.yml` / any `Dockerfile.*` — infra owns container/deployment wiring.
@@ -110,6 +110,42 @@ here approaches LLM-scale compute.
   itself a concrete argument for the pgvector ask in `PENDING_ACTIONS.md` #1, not just a workaround
   for its absence.
 
+### `sentiment/` — Phase 4 groundwork, multilingual sentiment analysis (spec §16, §23)
+
+Implements per-review sentiment classification and per-subject aggregation against the existing
+`reviews` / `sentiment_results` / `evidence_records` tables — no schema changes required.
+
+- `model.py` — wraps `cardiffnlp/twitter-xlm-roberta-base-sentiment`, a pretrained XLM-RoBERTa-based
+  3-class (positive/neutral/negative) classifier — spec §16's stated model choice, covering Arabic,
+  English, and mixed content with no per-language routing. Deliberately reads the label vocabulary
+  from the model's own `config.id2label` instead of assuming a fixed index order — confirmed by
+  testing that this specific model's actual order (`{0: 'negative', 1: 'neutral', 2: 'positive'}`)
+  isn't the naive alphabetical guess, and the project has already been bitten once this track by an
+  ordering assumption (the NER regex alternation-order bug). CPU-only, batched (`SENTIMENT_BATCH_SIZE`,
+  default 16). Confirmed manually on real Arabic and English reviews (see `test_sentiment_model_real.py`):
+  correctly classifies clear positive/negative/neutral cases in both languages.
+- `data_access.py` — reads unanalyzed `reviews` (ALLOWED-source, non-empty text only — spec §13's
+  Collection Policy Engine), and aggregates already-analyzed `sentiment_results` per subject
+  (product/competitor/business-overall), including the continuous sentiment score spec §16 allows
+  (`avg(positive_probability) − avg(negative_probability)`, count-weighted across labels).
+- `cold_start.py` — spec §16's sample-size policy: "If a country has insufficient review data, the
+  system must display LOW SAMPLE SIZE" / "must not present a statistically weak result as a reliable
+  market conclusion." Applied per-subject (`SENTIMENT_MIN_SAMPLE_SIZE`, default 10) rather than
+  strictly per-country, since `reviews` has no country column — see the note in the file.
+- `evidence.py` — writes `sentiment_results` rows and `evidence_records` (category `FACT`, or
+  `UNKNOWN` when a subject has zero analyzed reviews yet).
+- `pipeline.py` — two entry points, deliberately not one: `classify_and_store_reviews()` runs the
+  classifier over a tenant's unanalyzed reviews and writes raw `sentiment_results` rows (bulk
+  labeling, not itself a user-facing conclusion, so it writes no evidence — mirrors how
+  `rag/embeddings.py`'s embedding step is infrastructure, not evidence-bearing); `get_subject_sentiment_summary()`
+  aggregates already-analyzed sentiment for one subject, applies the LOW SAMPLE SIZE policy, and is
+  the only function here that writes to `evidence_records`.
+
+No event contract exists yet for triggering sentiment analysis (no `ceopro:stream:*` topic
+provisioned for it in `src/infrastructure/init_broker.py`), so — like `pricing/` — this is called
+directly rather than via a Redis consumer; add a `consumer.py` once such a contract is agreed, the
+same way `forecasting/consumer.py` was added for `demand_forecast_requested`.
+
 ### `extraction/` — Phase 4 groundwork, rule-based NER (spec §15)
 
 Implements the regex/rule tier of information extraction — spec §15's own explicitly-sanctioned
@@ -136,6 +172,9 @@ knowledge or a trained model to extract reliably; regex/catalog-matching can't d
   cold-start path is exercised by default until real data lands.
 - No real competitor price data or scraper running — `competitor_prices` exists but is empty, so
   `pricing/`'s `UNKNOWN`-evidence path is what actually executes today.
+- No real review data yet — `reviews` exists but is empty (same "table landed, no producer feeding it
+  yet" situation as `competitor_prices`), so `sentiment/`'s `UNKNOWN`-evidence path is what actually
+  executes today until a review-collection service starts writing to it.
 - `model_versions` has no `artifact_path` column yet, so trained model binaries aren't persisted to
   MinIO (`ceopro-ai-artifacts`) in this first version — metrics/version metadata are still recorded
   in `model_versions` on every training run. Wiring artifact storage is a follow-up once that column
@@ -223,6 +262,17 @@ AI_TEST_DATABASE_URL="postgresql://ceopro_admin:local_test_password_only@localho
 AI_TEST_MINIO_ENDPOINT="localhost:9002" \
 AI_TEST_EMBEDDINGS=1 \
   pytest src/ai/tests/test_rag_integration.py
+```
+
+`test_sentiment_model_real.py` needs `AI_TEST_SENTIMENT=1` — it downloads/loads the real ~1.1GB
+sentiment classifier (network access required, ~30s once cached). `test_sentiment_integration_db.py`
+only needs `AI_TEST_DATABASE_URL` (it patches `model.classify` with a deterministic fake, since the
+real model's own correctness is what `test_sentiment_model_real.py` already covers):
+
+```bash
+AI_TEST_SENTIMENT=1 pytest src/ai/tests/test_sentiment_model_real.py
+AI_TEST_DATABASE_URL="postgresql://ceopro_admin:local_test_password_only@localhost:5433/ceopro_platform" \
+  pytest src/ai/tests/test_sentiment_integration_db.py
 ```
 
 See [`AI_PROGRESS.md`](../../AI_PROGRESS.md) at the repo root for the dated log of what's been built,
