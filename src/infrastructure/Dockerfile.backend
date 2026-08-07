@@ -1,0 +1,61 @@
+﻿# ==========================================
+# STAGE 1: COMPILATION & DEPENDENCY BUILDER
+# ==========================================
+FROM python:3.11-alpine AS backend-compiler
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+RUN apk add --no-cache \
+    gcc \
+    musl-dev \
+    postgresql-dev \
+    libffi-dev \
+    apk-tools \
+    make \
+    && apk upgrade --no-cache
+
+COPY requirements.txt .
+
+RUN pip install --upgrade pip \
+    && pip install --no-cache-dir --user -r requirements.txt
+
+# ==========================================
+# STAGE 2: HARDENED PRODUCTION RUNTIME
+# ==========================================
+FROM python:3.11-alpine AS backend-runtime
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PATH=/home/ceopro/.local/bin:$PATH
+ENV HOME=/home/ceopro
+
+RUN apk add --no-cache \
+    libpq \
+    libffi \
+    apk-tools \
+    curl \
+    && apk upgrade --no-cache
+
+# Enforce Least Privilege Principle by establishing a non-root system group and user
+RUN addgroup -S ceoprogroup && adduser -S ceopro -G ceoprogroup
+
+# Establish clean state partition layers for system variables and cached files
+RUN mkdir -p /app/src /app/mocks /app/tmp /home/ceopro/.local \
+    && chown -R ceopro:ceopro /app /home/ceopro
+
+COPY --from=backend-compiler /root/.local /home/ceopro/.local
+COPY --chown=ceopro:ceopro . .
+
+USER ceopro
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+CMD ["python", "src/infrastructure/check_connectivity.py"]
