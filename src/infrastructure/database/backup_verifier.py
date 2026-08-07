@@ -15,7 +15,10 @@ import psycopg2
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("CEOPRO_BACKUP_CORE")
 
-EXPECTED_TABLE_COUNT = 15
+# Floor check, not an exact match - keep in sync with the CREATE TABLE count in
+# init_schema.sql (21 as of 2026-08-08; migrations/ isn't applied anywhere yet,
+# see PENDING_ACTIONS.md #22, so its tables aren't counted here).
+EXPECTED_TABLE_COUNT = 21
 
 
 class BackupValidator:

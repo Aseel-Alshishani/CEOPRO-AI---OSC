@@ -9,6 +9,7 @@ import psycopg2
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("CEOPRO_AI_CONSUMER_CORE")
 
+
 class AIStreamConsumer:
     def __init__(self, host: Optional[str] = None, port: Optional[int] = None, group_id: str = "ceopro-ai-nlp-extractors"):
         self.host = host or os.getenv("REDIS_HOST", "localhost")
@@ -18,7 +19,7 @@ class AIStreamConsumer:
         self.consumer_name = f"ai-core-node-{os.getpid()}"
 
         self.db_url = self._resolve_db_url()
-        
+
         try:
             self.client = redis.Redis(host=self.host, port=self.port, decode_responses=True)
             try:
@@ -33,12 +34,7 @@ class AIStreamConsumer:
     def _resolve_db_url(self) -> str:
         url = os.getenv("DATABASE_URL")
         if not url:
-            user = os.getenv("POSTGRES_USER", "ceopro_admin")
-            pwd = os.getenv("POSTGRES_PASSWORD", "SecurePassword2026")
-            host = os.getenv("POSTGRES_HOST", "localhost")
-            port = os.getenv("POSTGRES_PORT", "5432")
-            db = os.getenv("POSTGRES_DB", "ceopro_platform")
-            url = f"postgresql://{user}:{pwd}@{host}:{port}/{db}"
+            raise RuntimeError("DATABASE_URL environment variable is not set.")
         return url
 
     def _write_ingestion_staging_record(self, conn, tenant_id: str, product_name: str, price: float, currency: str) -> None:
@@ -49,18 +45,27 @@ class AIStreamConsumer:
             "ingested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ")
         }
         with conn.cursor() as cursor:
+            # import_staging_rows.job_id has a NOT NULL FK to ingestion_jobs - a
+            # hardcoded/placeholder UUID here violates that constraint on every
+            # insert (confirmed via testing). Each staged row from this stream
+            # gets its own ingestion_jobs record instead, matching what that
+            # table exists to represent.
+            cursor.execute(
+                """
+                INSERT INTO ingestion_jobs (tenant_id, status, started_at, completed_at)
+                VALUES (%s::uuid, 'completed', NOW(), NOW())
+                RETURNING job_id;
+                """,
+                (tenant_id,),
+            )
+            job_id = cursor.fetchone()[0]
+
             cursor.execute(
                 """
                 INSERT INTO import_staging_rows (job_id, tenant_id, row_number, raw_data, validation_status)
-                VALUES (
-                    '00000000-0000-0000-0000-000000000000'::uuid, 
-                    %s::uuid, 
-                    1, 
-                    %s::jsonb, 
-                    'needs_review'
-                );
+                VALUES (%s, %s::uuid, 1, %s::jsonb, 'needs_review');
                 """,
-                (tenant_id, json.dumps(raw_payload)),
+                (job_id, tenant_id, json.dumps(raw_payload)),
             )
 
     def execute_pipeline_listener(self):

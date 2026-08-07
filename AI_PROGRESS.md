@@ -796,6 +796,121 @@ codebase instead of assuming stale = wrong:
 No `src/ai/` code was touched — this was purely re-verifying and re-filing findings from a PR that
 can no longer be merged cleanly. Recommend closing PR #4 as superseded once these are confirmed landed.
 
+## 2026-08-08 — Infra bugs fixed directly, with explicit authorization (a deliberate exception to this track's usual boundary)
+
+Every previous infra finding this session was flagged in `PENDING_ACTIONS.md` and left for the owning
+team, per this track's standing rule. Explicitly authorized this round to fix the concrete, already-
+documented infra bugs directly instead. Building the missing backend/frontend, `Dockerfile.ai`, or a
+migration runner was **not** in scope — those are substantial new services/infrastructure, not bug
+fixes, and weren't attempted.
+
+**Fixed, each verified against real infrastructure, not just read for correctness:**
+
+- **`docker-compose.yml`**: `postgres` image tag `pgvector/pgvector:15-pgorg` (invalid) → `pgvector/pgvector:pg15`
+  (confirmed `docker pull` succeeds). Also dropped the obsolete `version: '3.8'` key (`docker compose config`
+  was warning about it).
+- **`src/infrastructure/database/migrations/20260807230419_add_row_level_security.sql`**: fixed the
+  `ai_recommendations` reference (a table that hasn't existed since commit `613ec53` renamed it to
+  `evidence_records`, well before this migration was written — traced via `git log -S"ai_recommendations"`).
+  Verified the *entire* migration sequence (`init_schema.sql` + all 4 remaining migration files, in
+  filename order) now applies with zero errors against a real disposable Postgres.
+- **Did not add `FORCE ROW LEVEL SECURITY`**, despite that being the actual fix for the owner-bypass
+  this track found earlier. Tested it first: applied `FORCE` to a table, connected as the real
+  `ceopro_admin` role (not `postgres` superuser, which bypasses RLS regardless of `FORCE` — the reason
+  this session's own test suite, always run as `postgres`, would never catch this), and queried with no
+  tenant context set. Result: zero rows, silently, not an error. `grep`'d all of `src/ai/` for
+  `SET app.current_tenant_id`/`set_config` — zero matches anywhere. Every `src/ai/` query relies on
+  `WHERE tenant_id = %s` instead. Adding `FORCE` without also retrofitting every connection-acquisition
+  point to set that session variable would trade a security hole for a silent, total application outage
+  the moment the app connects as anything other than a superuser. Logged as `PENDING_ACTIONS.md` #25 —
+  a real architectural decision, not a one-line fix, and not something to make unilaterally while
+  "cleaning up bugs."
+- **Two duplicate migration files** (byte-identical `CREATE TABLE news_record/social_mention/extracted_entity`
+  under two different timestamps) — deleted the later one; confirmed the remaining sequence applies clean.
+- **`src/infrastructure/messaging/ai_consumer.py`**: removed the hardcoded `POSTGRES_PASSWORD` fallback
+  (now raises if `DATABASE_URL` is unset, matching `watchdog.py`'s existing fix). Fixed the hardcoded
+  all-zeros `job_id` that violated the `fk_staging_job` FK constraint on literally every message this
+  consumer ever processed (confirmed: a `try`/`except`/`rollback` swallowed the error every time, so it
+  looked alive while silently failing 100% of the time) — now inserts a real `ingestion_jobs` row per
+  message and uses its actual generated `job_id`. Verified by reproducing the exact insert against a
+  real disposable Postgres — succeeds.
+- **`src/infrastructure/monitoring/watchdog.py`**: restored the module docstring's missing `"""` quoting
+  (confirmed via `ast.parse()`/`py_compile` that it now imports).
+- **`src/infrastructure/init_broker.py`**: was hardcoding `localhost:6379`, ignoring `REDIS_HOST`/`REDIS_PORT`
+  (every other file in the repo reads those) — would've silently targeted the wrong host inside Docker's
+  network. Fixed to read the env vars like everything else.
+- **`src/infrastructure/monitoring/grafana/provisioning/datasources/datasources.yml`**: the "Prometheus"
+  datasource had `type: postgres` instead of `type: prometheus` — Grafana would've tried to query
+  Prometheus's HTTP API using the Postgres wire protocol plugin. Fixed.
+- **`.env.example`**: added the previously-undocumented `ALERT_WEBHOOK_URL` (read in `watchdog.py`);
+  fixed `GRAFANA_ADMIN_PASSWORD`'s example value, which was a real-looking secret rather than this
+  file's own `change_this_password` placeholder convention used everywhere else in the file.
+- **`src/infrastructure/database/seed_demo_data.py`**: rewritten completely against the verified real
+  schema. The original called `random.poissonvariate` (doesn't exist in Python's `random` module —
+  confirmed it would `AttributeError` before writing a single row) and used column names that matched
+  none of `init_schema.sql`'s actual tables. Rewrite: a stdlib Knuth-algorithm Poisson sampler (no new
+  dependency), every INSERT verified against the real schema, `conn`/`cursor` initialized before the
+  `try` block (the original referenced them in `except`/`finally` unbound if `psycopg2.connect()` itself
+  failed), hardcoded credential fallback removed, and deterministic (`uuid5`-based) IDs so re-running
+  the script is a safe no-op for dimension data instead of piling up duplicates. Ran it end-to-end
+  against a real disposable Postgres: seeds 2 tenants, 2 users, 6 products, 6 inventory rows, 180
+  transactions, 6 forecasts, 3 currency rates, 1 RAG chunk — then ran it a second time and confirmed
+  dimension-table row counts didn't change (transaction/forecast counts legitimately grew, since those
+  are time-series event data, not dimension data).
+- **`src/infrastructure/database/backup_verifier.py`**: `EXPECTED_TABLE_COUNT` was hardcoded to 15 from
+  an earlier point in the schema's growth; the real count is now 21 — updated (it's a floor check, so
+  this was silently under-verifying, not failing, but still stale).
+- **`src/infrastructure/messaging/app_consumer.py`**: docstring/log line claimed it "forwards \[events\]
+  to the dashboard layer" — it only logs and acks, since no dashboard exists to forward to. Corrected
+  the docstring and log message to say so honestly rather than overclaiming.
+- Cleaned up flake8 nits (`E302`/`E305`/`W391`/line length) in every file touched.
+
+**New finding, logged, not fixed (a deployment-process decision, not a code bug):**
+`PENDING_ACTIONS.md` #26 — `ceopro_admin` (a non-superuser role, matching `.env.example`'s intended
+setup) can't run `CREATE EXTENSION vector` (`permission denied ... Must be superuser`). Found while
+setting up the RLS force-enforcement test against a realistic non-superuser owner role. Even with the
+pgvector image fixed, `init_schema.sql` will fail on its very first statement unless applied by a
+superuser or `ceopro_admin` is granted the extension-creation privilege.
+
+**Verification**: full `src/ai/` suite re-run against the fixed schema + fixed infra (real disposable
+Postgres + Redis, not mocks) after every change: 170 passed, 16 skipped (real-model/embedding/MinIO-gated,
+unaffected), 0 failed. `flake8` clean across all of `src/ai/` and every touched `src/infrastructure/`
+file. `docker compose config` validates cleanly.
+
+## 2026-08-08 — Correction to the previous entry: RLS is more broken than reported, tested the actual deployment config
+
+The previous entry's `FORCE ROW LEVEL SECURITY` analysis was tested against a manually-created
+`ceopro_admin` role (`CREATE ROLE ceopro_admin LOGIN ... CREATEDB`, explicitly not a superuser) —
+not against what `docker-compose.yml` actually produces. Went back and tested with the exact real
+config: `docker run ... -e POSTGRES_USER=ceopro_admin ... pgvector/pgvector:pg15` (the official
+image's own bootstrap-user creation, no manual role setup).
+
+**Result: `ceopro_admin`, as `docker-compose.yml` actually configures it, is a genuine Postgres
+superuser** — `SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user;` returns
+`t, t`. Superusers unconditionally bypass RLS; `FORCE ROW LEVEL SECURITY` has **no effect on them at
+all** — this isn't a missing setting, it's a hard Postgres behavior with no override. Reproduced
+directly: applied `FORCE` to a table, seeded two tenants, queried as `ceopro_admin` with zero tenant
+context set — both tenants' rows returned anyway, exactly as if `FORCE` had never been applied.
+
+This means the previous entry's framing ("add `FORCE` + retrofit `src/ai/` to `SET
+app.current_tenant_id`, that's the fix") was incomplete in a way that mattered: doing exactly that and
+nothing else would still leave tenant isolation completely unenforced, because the role bypassing RLS
+was never really about *whether* `FORCE` is set — it's about *which role* the app connects as. A real
+fix needs a separate, non-superuser application role (not `ceopro_admin`/the bootstrap superuser) in
+addition to `FORCE` and the `SET app.current_tenant_id` retrofit. Updated `PENDING_ACTIONS.md` #2 and
+#25 to reflect this (this file is append-only, so this is a new entry rather than an edit to the
+previous one, per its own stated convention: "if something is superseded, add a new entry that says
+so").
+
+**Also retracted**: the previous entry's item #26 (`ceopro_admin` can't run `CREATE EXTENSION vector`)
+was an artifact of that same non-superuser test role, not the real deployment — re-tested against the
+actual config and `CREATE EXTENSION vector` succeeds fine for the real, superuser `ceopro_admin`.
+Marked retracted in `PENDING_ACTIONS.md` rather than deleted, so the correction is visible.
+
+No `src/ai/` code changes in this entry — this was catching and correcting my own prior analysis
+before it merged, not new implementation work. `PENDING_ACTIONS.md` #2/#25/#26 updated on the same
+`claude/infra-bug-fixes` branch as the fixes themselves, before that PR merges.
+
 ## How to add an entry
 
 1. New date-stamped `##` section at the bottom (never edit history).
