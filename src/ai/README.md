@@ -69,28 +69,46 @@ purely rule-based per spec's explicit cold-start requirement for pricing.
 
 ### `rag/` — Phase 3 groundwork, retrieval only (spec §4, §6, §21)
 
-Implements document ingestion and lexical (BM25) retrieval against the existing
+Implements document ingestion and hybrid (lexical + semantic) retrieval against the existing
 `rag_documents_metadata` table and the `ceopro-rag-knowledge` MinIO bucket — no schema changes.
-**Not** the full RAG chatbot: no semantic (embedding/FAISS) retrieval, no LLM reasoning step, no chat
-history persistence (would need a new table). CPU-only, no transformer model at all — the lightest
-tier of the stack, by design, since neither pgvector nor a chat-history table exist yet.
+**Not** the full RAG chatbot: no LLM reasoning step, no chat history persistence (would need a new
+table). CPU-only throughout — the embedding model is small (~470MB, "light-medium" tier), nothing
+here approaches LLM-scale compute.
 
 - `chunking.py` — word-boundary overlapping-window text chunking. Works for Arabic and English alike
   (no language-specific tokenizer, spec §8's Arabic-English code-switching requirement).
-- `bm25_index.py` — in-memory BM25 index (`rank_bm25`, pure Python, no ML model). Uses **BM25Plus**,
+- `bm25_index.py` — in-memory lexical index (`rank_bm25`, pure Python, no ML model). Uses **BM25Plus**,
   not the more common BM25Okapi — see the note in the file: Okapi's IDF formula is exactly zero for
   any term appearing in precisely half a small corpus, which silently zeroed out obvious matches for
   tenants with only 2-3 documents (a realistic cold-start state). Found via the live-MinIO
   integration test, not by code review.
+- `embeddings.py` — multilingual sentence embeddings (`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`,
+  configurable via `RAG_EMBEDDING_MODEL`). CPU inference, ~470MB one-time download (cached locally
+  after). Confirmed manually: ~140s first download, ~20-30s to load a fresh process even once cached
+  (still checks the HF Hub), fast for repeat calls within one process (module-level model cache).
+- `faiss_index.py` — semantic retrieval index (`faiss-cpu`, exact flat search — corpus sizes here
+  don't warrant an approximate index). Embeddings are L2-normalized, so inner product = cosine
+  similarity.
+- `hybrid_retrieval.py` — Reciprocal Rank Fusion combining BM25 + FAISS rankings, unweighted (no
+  training/tuning, matching this module's rule-based approach elsewhere). **A real limitation found
+  during testing, not fixed**: with very short chunks (single sentences, 10-13 tokens) and a query
+  with only one genuine keyword match, BM25's document-length normalization can outrank a document
+  with zero real matches over one with a real match — and unweighted RRF doesn't reliably correct for
+  it when BM25 and FAISS disagree on which of only 2-3 candidates is "best" (see the note in
+  `test_rag_integration.py` for the specific case this showed up in). Works correctly and reliably
+  when either retriever alone would already find the right answer, or when BM25 finds literally no
+  matches for anything (letting FAISS's ranking pass through unweighted) — the fragile case is
+  specifically "BM25 and FAISS disagree between few very short candidates."
 - `data_access.py` — reads/updates `rag_documents_metadata`, fetches raw MinIO object bytes. Handles
   plain-text (`.txt`) content only — PDF/DOCX extraction isn't implemented (flagged in
   `PENDING_ACTIONS.md`).
 - `pipeline.py` — `ingest_pending_documents()` (fetch → chunk-check → mark Processed/Failed, never
-  silently drops a document per spec §12) and `build_tenant_index()` (rebuild a BM25 index from every
-  Processed document's *current* MinIO content, since there's no `knowledge_chunks` table to persist
-  chunk text in — chunks aren't stored anywhere of their own, they're recomputed on every retrieval
-  call). That's correct but doesn't scale, which is itself a concrete argument for the pgvector ask
-  in `PENDING_ACTIONS.md` #1, not just a workaround for its absence.
+  silently drops a document per spec §12); `build_tenant_index()`/`retrieve()` for BM25-only (no
+  embedding model needed); `build_hybrid_index()`/`retrieve_hybrid()` for the full lexical+semantic
+  pipeline. Since there's no `knowledge_chunks` table, nothing is persisted between calls — chunks
+  and embeddings are recomputed from MinIO on every call. That's correct but doesn't scale, which is
+  itself a concrete argument for the pgvector ask in `PENDING_ACTIONS.md` #1, not just a workaround
+  for its absence.
 
 ### `extraction/` — Phase 4 groundwork, rule-based NER (spec §15)
 
@@ -191,6 +209,20 @@ AI_TEST_DATABASE_URL="postgresql://ceopro_admin:local_test_password_only@localho
 AI_TEST_MINIO_ENDPOINT="localhost:9002" \
   pytest src/ai/tests/test_rag_integration.py
 docker rm -f ceopro_minio_aitest
+```
+
+`test_rag_embeddings.py` and the hybrid-retrieval test in `test_rag_integration.py` additionally
+need `AI_TEST_EMBEDDINGS=1` — they download/load the real ~470MB embedding model (network access
+required, ~140s first time, ~20-30s per fresh process even cached). Not required for the rest of the
+suite, including the BM25-only RAG tests:
+
+```bash
+AI_TEST_EMBEDDINGS=1 pytest src/ai/tests/test_rag_embeddings.py
+# or combined with the Postgres+MinIO setup above, for the hybrid-retrieval integration test:
+AI_TEST_DATABASE_URL="postgresql://ceopro_admin:local_test_password_only@localhost:5433/ceopro_platform" \
+AI_TEST_MINIO_ENDPOINT="localhost:9002" \
+AI_TEST_EMBEDDINGS=1 \
+  pytest src/ai/tests/test_rag_integration.py
 ```
 
 See [`AI_PROGRESS.md`](../../AI_PROGRESS.md) at the repo root for the dated log of what's been built,

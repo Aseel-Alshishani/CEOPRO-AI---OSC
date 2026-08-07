@@ -20,7 +20,7 @@ in [`PENDING_ACTIONS.md`](PENDING_ACTIONS.md) so it stays visible without diggin
 | Spec phase | Module | Status | Notes |
 |---|---|---|---|
 | Phase 2 — Demand Intelligence (§18, §23, §25) | `src/ai/forecasting/` | 🟢 Built, tested (unit + integration) | Baselines, XGBoost + walk-forward validation, cold-start policy, evidence writers, Redis consumer. See entries below. |
-| Phase 3 — RAG Chatbot (§21) | `src/ai/rag/` | 🟡 Retrieval built/tested; chatbot itself not started | Document ingestion + BM25 lexical retrieval built against existing `rag_documents_metadata` + MinIO — doesn't need pgvector. Still missing: semantic/FAISS retrieval, LLM reasoning step, chat history (needs a new table). See entry below. |
+| Phase 3 — RAG Chatbot (§21) | `src/ai/rag/` | 🟡 Hybrid (lexical + semantic) retrieval built/tested; chatbot itself not started | Document ingestion + BM25 + FAISS semantic retrieval + Reciprocal Rank Fusion, all against existing `rag_documents_metadata` + MinIO — none of it needs pgvector. Still missing: LLM reasoning step, chat history (needs a new table). A real fusion edge case found and documented (not fixed — inherent BM25 behavior on very short chunks). See entries below. |
 | Phase 4 — Market Intelligence (§15, §16, §17) | `src/ai/extraction/` | 🟡 Rule-based NER built/tested; sentiment + persistence not started | Regex extraction (MONEY/CURRENCY/PERCENT/DISCOUNT/EMAIL/PHONE/INVOICE_ID/ORDER_ID/DATE) + catalog matching (PRODUCT/COMPETITOR) built. No `extracted_entity` table to write results to yet; sentiment analysis and ORG/PERSON/GPE entity types not started (need a heavier pretrained model — deferred, see `AI_PROGRESS.md`'s compute-tier discussion). See entry below. |
 | Phase 5 — Price Intelligence (§19) | `src/ai/pricing/` | 🟢 Built, tested (unit + integration) | Product matching, rule-based recommendation, price-change guardrail, evidence + recommendation_outcomes writers. See entry below. Margin guardrails are weaker than spec'd — `products` has no cost column (`PENDING_ACTIONS.md` #14). Real competitor price data still doesn't exist (`PENDING_ACTIONS.md` #5), so the cold-start/UNKNOWN path is what actually runs today, same as Phase 2. |
 | Phase 6 — Competitor Ranking (§20) | — | ⚪ Not started | Same data gap as Phase 5 (`PENDING_ACTIONS.md` #5). |
@@ -290,6 +290,54 @@ Postgres up (all applicable pass). `flake8` clean.
 
 No new `PENDING_ACTIONS.md` items — the `extracted_entity` table gap was already implied by item #4,
 now made concrete: the extraction logic itself is no longer the blocker, only the persistence table.
+
+## 2026-08-07 — Semantic (FAISS) retrieval + hybrid fusion added to `src/ai/rag/`
+
+Fourth and final item off the original no-heavy-compute prioritized list (item 5, sentiment, is a
+separate, heavier follow-up — see note at the end of this entry). Confirmed feasibility first: a real
+multilingual embedding model (`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, 384-dim,
+~470MB) downloads and runs on CPU in this environment — ~140s first download, ~20-30s per fresh
+process even cached (still checks the HF Hub), fast for repeat calls within one process. Confirmed
+cross-lingual understanding directly: English "Sunscreen is our best selling product" vs. Arabic
+"واقي الشمس هو المنتج الأكثر مبيعا لدينا" (same meaning) scored 0.64 cosine similarity — clearly
+higher than an unrelated sentence in either language.
+
+Built:
+- `embeddings.py` — thin wrapper, lazy-loaded and cached per model name.
+- `faiss_index.py` — flat inner-product index (embeddings are L2-normalized, so this is cosine
+  similarity; exact search, no approximate-index tuning needed at per-tenant corpus sizes).
+- `hybrid_retrieval.py` — Reciprocal Rank Fusion, unweighted, combining BM25 + FAISS rankings.
+- `pipeline.py` extended with `build_hybrid_index()`/`retrieve_hybrid()` alongside the existing
+  BM25-only path (kept, for callers that don't need the embedding model at all).
+- Deduplicated `ScoredChunk` (previously defined identically in both `bm25_index.py` and the new
+  `faiss_index.py`) into a shared `retrieval_types.py`.
+
+**A real, documented (not "fixed") limitation found via the live-embeddings integration test**: with
+very short chunks (single sentences, 10-13 tokens) and a query with exactly one genuine keyword match
+to one document, BM25's own document-length normalization can rank a *zero-match* document above the
+one-match document — completely standard, correct BM25 behavior (shorter documents get a length-norm
+boost), but counterintuitive at sentence-length chunks where BM25's normalization assumptions (tuned
+for paragraph/page-length documents) have an outsized effect. When this happened, FAISS ranked the
+opposite way, and unweighted Reciprocal Rank Fusion produced a near-tie that didn't reliably surface
+the "obviously correct to a human" answer. This isn't a coding bug — verified BM25Plus's `idf`/`delta`
+math by hand — it's a property of applying paragraph-tuned BM25 to sentence-length chunks. **Not
+fixed** (would mean either a length-normalization tweak or a weighted, tuned fusion — both real design
+decisions, not obvious defaults, and out of scope for what was asked). Documented in `rag/README`
+(`src/ai/README.md`) and in the integration test itself, with a query chosen to demonstrate hybrid
+retrieval's real value (zero-lexical-overlap query, letting FAISS's semantic ranking pass through
+cleanly) rather than one that happened to hit the fragile case.
+
+**Full suite: 136 tests** (forecasting 46, pricing 27, rag 35, extraction 28). Verified three ways: no
+live infra/opt-in flags (104 pass, 32 skip), Postgres+MinIO+embeddings all up (126 pass, 10 skip —
+only the Redis consumer tests, not requested this round), confirming nothing regressed. `flake8`
+clean.
+
+**On item 5 (sentiment) from the original prioritized list**: not started this round. It needs a
+noticeably heavier pretrained transformer (~250-550M params, vs. the ~470MB/fast-CPU embedding model
+here) and — more fundamentally — there's no source text to run it on yet (`reviews`, `news_record`,
+`social_mention` tables don't exist, `PENDING_ACTIONS.md` #4). Building the classifier wrapper alone
+without any real text to validate it against would be much lower-confidence work than everything
+built so far, all of which was verified against real data through real infra.
 
 ## How to add an entry
 

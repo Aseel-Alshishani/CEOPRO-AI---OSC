@@ -7,23 +7,17 @@ language-specific tokenizer, matching chunking.py's approach.
 """
 
 import re
-from dataclasses import dataclass
 from typing import List, Tuple
 
 from rank_bm25 import BM25Plus
+
+from src.ai.rag.retrieval_types import ScoredChunk
 
 _TOKEN_PATTERN = re.compile(r"\w+", re.UNICODE)
 
 
 def tokenize(text: str) -> List[str]:
     return _TOKEN_PATTERN.findall(text.lower())
-
-
-@dataclass
-class ScoredChunk:
-    chunk_id: str
-    text: str
-    score: float
 
 
 class BM25Index:

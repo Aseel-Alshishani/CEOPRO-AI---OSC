@@ -122,3 +122,42 @@ def test_build_tenant_index_and_retrieve_end_to_end(conn, minio_client, seeded_t
     results = pipeline.retrieve(index, "sunscreen summer UV protection", top_k=5)
     assert len(results) > 0
     assert "Sunscreen" in results[0].text
+
+
+@pytest.mark.skipif(
+    not os.getenv("AI_TEST_EMBEDDINGS"), reason="AI_TEST_EMBEDDINGS not set - skipping (downloads a real model)"
+)
+def test_build_hybrid_index_and_retrieve_end_to_end(conn, minio_client, seeded_tenant):
+    """
+    Query is deliberately chosen with zero literal word overlap with any
+    document, so BM25 contributes nothing and the ranking is driven purely by
+    FAISS's semantic similarity - the clean way to verify hybrid retrieval
+    surfaces a semantic match. A query with partial overlap ("sun protection
+    cream for hot weather") was tried first and is NOT reliable here: with
+    documents this short (single sentences, 10-13 tokens), BM25's length
+    normalization can outweigh a single genuine keyword match, and equal-
+    weighted Reciprocal Rank Fusion doesn't reliably correct for that against
+    FAISS's opposite ranking - a real characteristic of short-chunk BM25, not
+    a bug, but not safe to assert a specific winner on either. See
+    AI_PROGRESS.md's entry for this module for the full investigation.
+    """
+    doc1_key = f"test/{uuid.uuid4()}.txt"
+    doc2_key = f"test/{uuid.uuid4()}.txt"
+    doc3_key = f"test/{uuid.uuid4()}.txt"
+    _upload_text(minio_client, doc1_key, "Sunscreen SPF 50 is our best selling summer product with high UV protection.")
+    _upload_text(minio_client, doc2_key, "Our warehouse policy covers moisturizer lotion storage for winter climates.")
+    _upload_text(minio_client, doc3_key, "The quarterly financial audit report was completed and approved yesterday.")
+    _insert_document(conn, seeded_tenant, "doc1.txt", doc1_key)
+    _insert_document(conn, seeded_tenant, "doc2.txt", doc2_key)
+    _insert_document(conn, seeded_tenant, "doc3.txt", doc3_key)
+
+    processed_count = pipeline.ingest_pending_documents(conn, minio_client, seeded_tenant, bucket=TEST_BUCKET)
+    assert processed_count == 3
+
+    tenant_index = pipeline.build_hybrid_index(conn, minio_client, seeded_tenant, bucket=TEST_BUCKET)
+    assert len(tenant_index.bm25) == 3
+    assert len(tenant_index.faiss) == 3
+
+    results = pipeline.retrieve_hybrid(tenant_index, "topical cream that prevents skin damage from strong sunlight", top_k=5)
+    assert len(results) > 0
+    assert "Sunscreen" in results[0].text  # semantically related despite zero literal keyword overlap
