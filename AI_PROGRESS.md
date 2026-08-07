@@ -877,6 +877,40 @@ Postgres + Redis, not mocks) after every change: 170 passed, 16 skipped (real-mo
 unaffected), 0 failed. `flake8` clean across all of `src/ai/` and every touched `src/infrastructure/`
 file. `docker compose config` validates cleanly.
 
+## 2026-08-08 — Correction to the previous entry: RLS is more broken than reported, tested the actual deployment config
+
+The previous entry's `FORCE ROW LEVEL SECURITY` analysis was tested against a manually-created
+`ceopro_admin` role (`CREATE ROLE ceopro_admin LOGIN ... CREATEDB`, explicitly not a superuser) —
+not against what `docker-compose.yml` actually produces. Went back and tested with the exact real
+config: `docker run ... -e POSTGRES_USER=ceopro_admin ... pgvector/pgvector:pg15` (the official
+image's own bootstrap-user creation, no manual role setup).
+
+**Result: `ceopro_admin`, as `docker-compose.yml` actually configures it, is a genuine Postgres
+superuser** — `SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user;` returns
+`t, t`. Superusers unconditionally bypass RLS; `FORCE ROW LEVEL SECURITY` has **no effect on them at
+all** — this isn't a missing setting, it's a hard Postgres behavior with no override. Reproduced
+directly: applied `FORCE` to a table, seeded two tenants, queried as `ceopro_admin` with zero tenant
+context set — both tenants' rows returned anyway, exactly as if `FORCE` had never been applied.
+
+This means the previous entry's framing ("add `FORCE` + retrofit `src/ai/` to `SET
+app.current_tenant_id`, that's the fix") was incomplete in a way that mattered: doing exactly that and
+nothing else would still leave tenant isolation completely unenforced, because the role bypassing RLS
+was never really about *whether* `FORCE` is set — it's about *which role* the app connects as. A real
+fix needs a separate, non-superuser application role (not `ceopro_admin`/the bootstrap superuser) in
+addition to `FORCE` and the `SET app.current_tenant_id` retrofit. Updated `PENDING_ACTIONS.md` #2 and
+#25 to reflect this (this file is append-only, so this is a new entry rather than an edit to the
+previous one, per its own stated convention: "if something is superseded, add a new entry that says
+so").
+
+**Also retracted**: the previous entry's item #26 (`ceopro_admin` can't run `CREATE EXTENSION vector`)
+was an artifact of that same non-superuser test role, not the real deployment — re-tested against the
+actual config and `CREATE EXTENSION vector` succeeds fine for the real, superuser `ceopro_admin`.
+Marked retracted in `PENDING_ACTIONS.md` rather than deleted, so the correction is visible.
+
+No `src/ai/` code changes in this entry — this was catching and correcting my own prior analysis
+before it merged, not new implementation work. `PENDING_ACTIONS.md` #2/#25/#26 updated on the same
+`claude/infra-bug-fixes` branch as the fixes themselves, before that PR merges.
+
 ## How to add an entry
 
 1. New date-stamped `##` section at the bottom (never edit history).
