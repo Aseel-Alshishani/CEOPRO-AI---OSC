@@ -69,3 +69,40 @@ def load_competitor_prices(conn, tenant_id: str, currency: str, max_age_days: in
         }
         for row in rows
     ]
+
+
+def load_cross_currency_competitor_prices(conn, tenant_id: str, exclude_currency: str, max_age_days: int = None) -> list:
+    """
+    Same filters as load_competitor_prices, but for every OTHER currency -
+    i.e. candidates for cross-country reference (spec S19's "CROSS-COUNTRY
+    COMPARISON"), never blended into the same-currency "LOCAL MARKET
+    COMPARISON" set load_competitor_prices returns.
+    """
+    max_age_days = MAX_PRICE_AGE_DAYS if max_age_days is None else max_age_days
+
+    query = """
+        SELECT cp.price_entry_id, cp.competitor_id, cp.product_name_captured, cp.price_found, cp.currency, cp.captured_at
+        FROM competitor_prices cp
+        JOIN competitors c ON c.competitor_id = cp.competitor_id
+        WHERE cp.tenant_id = %s
+          AND cp.currency != %s
+          AND cp.is_exact_data = TRUE
+          AND cp.source_status = 'ALLOWED'
+          AND c.is_active = TRUE
+          AND cp.captured_at >= NOW() - (%s || ' days')::interval;
+    """
+    with conn.cursor() as cursor:
+        cursor.execute(query, (tenant_id, exclude_currency, str(max_age_days)))
+        rows = cursor.fetchall()
+
+    return [
+        {
+            "price_entry_id": str(row[0]),
+            "competitor_id": str(row[1]),
+            "product_name_captured": row[2],
+            "price_found": float(row[3]),
+            "currency": row[4],
+            "captured_at": row[5],
+        }
+        for row in rows
+    ]

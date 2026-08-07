@@ -43,29 +43,44 @@ changes required.
 
 Runs CPU-only by design — no GPU dependency anywhere in this module.
 
-### `pricing/` — Phase 5, Price Intelligence (spec §19, §23, §24)
+### `pricing/` — Phase 5, Price Intelligence (spec §9, §19, §23, §24)
 
-Implements same-currency competitor price comparison against the existing `products` /
-`competitors` / `competitor_prices` / `evidence_records` / `recommendation_outcomes` tables — no
+Implements competitor price comparison against the existing `products` / `competitors` /
+`competitor_prices` / `currency_rates` / `evidence_records` / `recommendation_outcomes` tables — no
 schema changes required.
 
 - `matching.py` — name-similarity matching (`difflib`) between our `products.product_name` and
   `competitor_prices.product_name_captured` (free text, no FK between them).
-- `data_access.py` — reads own product price/currency and same-currency, `ALLOWED`-source, exact,
-  fresh (default 30-day window) competitor prices.
+- `data_access.py` — reads own product price/currency, same-currency competitor prices (the
+  recommendation-driving set), and separately, cross-currency competitor prices (reference only —
+  see `pipeline.py` below). All filtered to `ALLOWED`-source, exact, fresh (default 30-day window),
+  and the competitor being currently active.
+- `currency.py` — spec §9's traceability requirements: every conversion carries its original
+  amount/currency alongside the converted figure, plus the rate, its date, and its source. Returns
+  `None` rather than guessing when no rate is available ("the system must explicitly indicate that
+  conversion cannot be verified") — doesn't invert rates (e.g. use a stored JOD→SAR rate to serve a
+  SAR→JOD request), since that's an inference about `currency_rates`' data this module isn't in a
+  position to make.
 - `recommendation.py` — transparent rule-based raise/lower/hold recommendation vs. the matched
-  competitors' market average. Not a learned model — spec §19 requires enough price-change history
-  to exist first, and there isn't any yet.
+  **same-currency** competitors' market average only. Not a learned model — spec §19 requires enough
+  price-change history to exist first, and there isn't any yet.
 - `guardrails.py` — bounds how far a suggested price can move from the current price (default 15%).
   **Not** a margin guardrail — `products` has no cost column (see blockers below).
 - `evidence.py` — reuses `forecasting.evidence.insert_evidence_record` (spec §22: one shared evidence
   architecture, not reimplemented per module) and adds `insert_recommendation_outcome`.
 - `pipeline.py` — orchestrates: load own product → load same-currency competitor prices → match by
   name → no matches: `UNKNOWN` evidence (cold-start) → matches: recommendation → guardrail → persist.
+  Cross-currency matches, when any exist and convert successfully, get appended to the evidence
+  explanation as a clearly-labeled **reference-only** note — spec §19: "The system must NOT use a
+  simple currency conversion as the only basis for a cross-country pricing recommendation," so
+  cross-currency data is never blended into `recommendation.py`'s market-average math, only surfaced
+  as context.
 
-Only handles spec §19's "LOCAL MARKET COMPARISON" (same currency) — "CROSS-COUNTRY COMPARISON" needs
-`currency_rates`, which doesn't exist (see blockers below). CPU-only, no ML model at all currently —
-purely rule-based per spec's explicit cold-start requirement for pricing.
+Same-currency comparison is spec §19's "LOCAL MARKET COMPARISON." Cross-currency reference is a
+first step toward "CROSS-COUNTRY COMPARISON," but not the full thing — spec §19 also asks for
+purchasing power, local taxes, import costs, and shipping to be accounted for, none of which is
+modeled here; a converted price is shown as context, not treated as an equivalent competitor. CPU-only,
+no ML model at all — purely rule-based per spec's explicit cold-start requirement for pricing.
 
 ### `rag/` — Phase 3 groundwork, retrieval only (spec §4, §6, §21)
 
@@ -142,8 +157,13 @@ knowledge or a trained model to extract reliably; regex/catalog-matching can't d
   exists.
 - `products` has no `cost` column, so `pricing/guardrails.py` can only bound price-change magnitude,
   not enforce a real margin floor as spec §19 also asks for.
-- pgvector / `knowledge_chunks` / Row-Level Security / `currency_rates` remain infra-owned blocking
-  asks for later phases (RAG chatbot, cross-currency pricing) — out of scope for this module.
+- `currency_rates` table landed and is now wired into `pricing/currency.py` — no longer blocked.
+- pgvector's *schema* (extension + `rag_document_chunks`) landed, but `docker-compose.yml`'s
+  `postgres` image tag is invalid (doesn't exist on Docker Hub) — not actually deployable yet
+  (`PENDING_ACTIONS.md` #1/#17).
+- Row-Level Security policies exist and are enabled, but currently provide no real protection — the
+  app connects as the table-owner role, which Postgres exempts from RLS by default; confirmed with a
+  direct test (`PENDING_ACTIONS.md` #2).
 - `rag/data_access.py` decodes MinIO objects as plain UTF-8 text only — PDF/DOCX documents (which
   `MINIO_STORAGE_ARCHITECTURE.md` explicitly expects in `ceopro-rag-knowledge`) aren't extracted.
 - No chat-history table exists, so RAG conversation persistence isn't implemented.

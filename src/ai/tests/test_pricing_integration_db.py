@@ -6,12 +6,12 @@ skipped unless AI_TEST_DATABASE_URL is set.
 
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import psycopg2
 import pytest
 
-from src.ai.pricing import data_access, pipeline
+from src.ai.pricing import currency, data_access, pipeline
 
 DATABASE_URL = os.getenv("AI_TEST_DATABASE_URL")
 
@@ -125,6 +125,93 @@ def test_run_price_recommendation_end_to_end_against_real_db(conn, seeded_tenant
         assert row[0] == result["evidence_id"]
         assert row[1] == tenant_id
         assert row[2] == "ignored"  # DB default, not yet acted on
+
+
+def _upsert_currency_rate(conn, base: str, target: str, rate: float, rate_date_value: date, source: str) -> None:
+    """
+    currency_rates has no tenant_id (rates aren't tenant-scoped) and a unique
+    constraint on (base, target, rate_date) - a plain INSERT would collide
+    with whatever a previous run of this same test already committed. Upsert
+    instead so these tests are idempotent regardless of prior runs.
+    """
+    with conn.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO currency_rates (base_currency, target_currency, rate, rate_date, source)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (base_currency, target_currency, rate_date)
+            DO UPDATE SET rate = EXCLUDED.rate, source = EXCLUDED.source;
+            """,
+            (base, target, rate, rate_date_value, source),
+        )
+    conn.commit()
+
+
+def test_get_latest_rate_reads_seeded_currency_rate(conn):
+    _upsert_currency_rate(conn, "SAR", "JOD", 0.9500, date(2026, 8, 1), "test_feed")
+
+    rate = currency.get_latest_rate(conn, "SAR", "JOD")
+    assert rate.rate == 0.95
+    assert rate.source == "test_feed"
+
+
+def test_get_latest_rate_picks_most_recent_when_multiple_dates_exist(conn):
+    _upsert_currency_rate(conn, "SAR", "JOD", 0.9000, date(2026, 1, 1), "old_feed")
+    _upsert_currency_rate(conn, "SAR", "JOD", 0.9500, date(2026, 8, 1), "new_feed")
+
+    rate = currency.get_latest_rate(conn, "SAR", "JOD")
+    assert rate.rate == 0.95
+    assert rate.source == "new_feed"
+
+
+def test_run_price_recommendation_includes_cross_currency_reference_against_real_db(conn):
+    tenant_id = str(uuid.uuid4())
+    product_id = str(uuid.uuid4())
+    competitor_id = str(uuid.uuid4())
+
+    with conn.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO companies (tenant_id, business_name, country_code, primary_currency)
+            VALUES (%s, 'Cross Currency Test Co', 'JO', 'JOD');
+            """,
+            (tenant_id,),
+        )
+        cursor.execute(
+            """
+            INSERT INTO products (product_id, tenant_id, product_name, current_price, currency)
+            VALUES (%s, %s, 'Sunscreen SPF 50', 20.00, 'JOD');
+            """,
+            (product_id, tenant_id),
+        )
+        cursor.execute(
+            """
+            INSERT INTO competitors (competitor_id, tenant_id, competitor_name, country_code)
+            VALUES (%s, %s, 'Gulf Pharmacy', 'SA');
+            """,
+            (competitor_id, tenant_id),
+        )
+        cursor.execute(
+            """
+            INSERT INTO competitor_prices
+                (tenant_id, competitor_id, product_name_captured, price_found, currency,
+                 is_exact_data, collection_method, source_status, captured_at)
+            VALUES (%s, %s, 'Sunscreen SPF 50', 75.00, 'SAR', TRUE, 'MANUAL', 'ALLOWED', %s);
+            """,
+            (tenant_id, competitor_id, datetime.now(timezone.utc)),
+        )
+    conn.commit()
+    _upsert_currency_rate(conn, "SAR", "JOD", 0.9500, date(2026, 8, 1), "test_feed")
+
+    result = pipeline.run_price_recommendation(conn, tenant_id, product_id)
+
+    assert result["status"] == "UNKNOWN"  # no same-currency competitors matched
+    with conn.cursor() as cursor:
+        cursor.execute("SELECT explanation_text FROM evidence_records WHERE evidence_id = %s;", (result["evidence_id"],))
+        explanation = cursor.fetchone()[0]
+        assert "reference only" in explanation
+        assert "75.00 SAR" in explanation
+        assert "71.25 JOD" in explanation  # 75.00 * 0.95
 
 
 def test_run_price_recommendation_with_no_competitor_data_writes_unknown_evidence(conn):
