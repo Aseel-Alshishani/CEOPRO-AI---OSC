@@ -39,3 +39,16 @@ The platform coordinates background tasks asynchronously using defined schema ev
     "timestamp": "2026-07-27T09:50:02Z"
   }
   ```
+  ### Event C: campaign_image_requested
+- **Producer**: Web Application Service (triggered from the Marketing module)
+- **Consumer**: AI / ML Marketing Content Service
+- **Payload Schema**:
+  {
+    "event_id": "uuid-v4",
+    "tenant_id": "uuid-v4",
+    "product_id": "uuid-v4",
+    "style": "minimal",
+    "tone": "sales-driven",
+    "focus": "discount",
+    "timestamp": "2026-07-27T09:50:04Z"
+  }
