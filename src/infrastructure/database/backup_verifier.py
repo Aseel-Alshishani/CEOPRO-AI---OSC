@@ -6,10 +6,10 @@ Executes sandboxed verification lifecycles using atomic memory buffers to ensure
 import hashlib
 import logging
 import os
+import secrets
 import subprocess
 import sys
 import time
-from typing import Dict, Any, Optional
 import psycopg2
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -23,7 +23,7 @@ class EnterpriseBackupValidator:
         self.container_name = "ceopro_postgres"
         self.target_dir = "src/infrastructure/database/backups"
         self.snapshot_path = f"{self.target_dir}/snapshot_{int(time.time_ns())}.sql"
-        self.sandbox_db = f"ceopro_sandbox_{secrets.token_hex(4)}" if "secrets" in sys.modules else f"ceopro_sandbox_{int(time.time())}"
+        self.sandbox_db = f"ceopro_sandbox_{secrets.token_hex(4)}"
 
     def _generate_file_checksum(self, filepath: str) -> str:
         sha256_hash = hashlib.sha256()
@@ -89,7 +89,7 @@ class EnterpriseBackupValidator:
                     FROM information_schema.tables 
                     WHERE table_schema = 'public';
                 """)
-                tables = cursor.fetchone()[0]
+                tables = int(cursor.fetchone()[0])
                 logger.info(f"Integrity matrix verified. Recovered distinct system tables: {tables}")
                 
                 if tables < 14:
