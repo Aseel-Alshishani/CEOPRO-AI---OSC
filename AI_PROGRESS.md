@@ -21,8 +21,8 @@ in [`PENDING_ACTIONS.md`](PENDING_ACTIONS.md) so it stays visible without diggin
 |---|---|---|---|
 | Phase 2 — Demand Intelligence (§18, §23, §25) | `src/ai/forecasting/` | 🟢 Built, tested (unit + integration) | Baselines, XGBoost + walk-forward validation, cold-start policy, evidence writers, Redis consumer. See entries below. |
 | Phase 3 — RAG Chatbot (§21) | `src/ai/rag/` | 🟡 Hybrid (lexical + semantic) retrieval built/tested; chatbot itself not started | Document ingestion + BM25 + FAISS semantic retrieval + Reciprocal Rank Fusion, all against existing `rag_documents_metadata` + MinIO — none of it needs pgvector. Still missing: LLM reasoning step, chat history (needs a new table). A real fusion edge case found and documented (not fixed — inherent BM25 behavior on very short chunks). See entries below. |
-| Phase 4 — Market Intelligence (§15, §16, §17) | `src/ai/extraction/` | 🟡 Rule-based NER built/tested; sentiment + persistence not started | Regex extraction (MONEY/CURRENCY/PERCENT/DISCOUNT/EMAIL/PHONE/INVOICE_ID/ORDER_ID/DATE) + catalog matching (PRODUCT/COMPETITOR) built. No `extracted_entity` table to write results to yet; sentiment analysis and ORG/PERSON/GPE entity types not started (need a heavier pretrained model — deferred, see `AI_PROGRESS.md`'s compute-tier discussion). See entry below. |
-| Phase 5 — Price Intelligence (§9, §19) | `src/ai/pricing/` | 🟢 Built, tested (unit + integration) | Product matching, rule-based recommendation, price-change guardrail, evidence + recommendation_outcomes writers, plus traceable currency conversion (`currency.py`) surfacing cross-currency competitor prices as reference-only context. See entries below. Margin guardrails are weaker than spec'd — `products` has no cost column (`PENDING_ACTIONS.md` #14). Real competitor price data still doesn't exist (`PENDING_ACTIONS.md` #5), so the cold-start/UNKNOWN path is what actually runs today, same as Phase 2. |
+| Phase 4 — Market Intelligence (§15, §16, §17) | `src/ai/extraction/`, `src/ai/sentiment/` | 🟡 Rule-based NER + sentiment analysis built/tested; NER persistence + MPI (§17) not started | Regex extraction (MONEY/CURRENCY/PERCENT/DISCOUNT/EMAIL/PHONE/INVOICE_ID/ORDER_ID/DATE) + catalog matching (PRODUCT/COMPETITOR) built. No `extracted_entity` table to write results to yet; ORG/PERSON/GPE entity types not started. Sentiment analysis (`sentiment/`) built: XLM-RoBERTa-based classifier (`cardiffnlp/twitter-xlm-roberta-base-sentiment`), per-subject aggregation, LOW SAMPLE SIZE policy — `reviews` table is currently empty in prod, so the `UNKNOWN`-evidence path is what runs today. Market Perception Index (§17, combines sentiment + source reliability + recency + volume + entity relevance) not started. See entries below. |
+| Phase 5 — Price Intelligence (§9, §19) | `src/ai/pricing/` | 🟢 Built, tested (unit + integration) | Product matching, rule-based recommendation, price-change guardrail, evidence + recommendation_outcomes writers, plus traceable currency conversion (`currency.py`) surfacing cross-currency competitor prices as reference-only context ([PR #5](https://github.com/Huda-Hassouneh/CEOPRO-AI/pull/5), merged 2026-08-07). See entries below. Margin guardrails are weaker than spec'd — `products` has no cost column (`PENDING_ACTIONS.md` #14). Real competitor price data still doesn't exist (`PENDING_ACTIONS.md` #5), so the cold-start/UNKNOWN path is what actually runs today, same as Phase 2. |
 | Phase 6 — Competitor Ranking (§20) | — | ⚪ Not started | Same data gap as Phase 5 (`PENDING_ACTIONS.md` #5). |
 
 Legend: 🟢 built and tested · 🟡 in progress · 🟠 blocked on another team · ⚪ not started.
@@ -566,6 +566,168 @@ using the *correct* pgvector image this time (`pgvector/pgvector:pg15`, not the 
 right now) — loaded the full schema including RLS policies and pgvector cleanly. Ran the entire
 160-test suite with Postgres + Redis + MinIO + the real embedding model all up simultaneously: all
 pass. `flake8` clean.
+
+## 2026-08-07 — Phase 4 sentiment analysis built: `src/ai/sentiment/`
+
+Built the multilingual sentiment classification piece of spec §16 (Market Intelligence), now unblocked
+since the `reviews`/`sentiment_results` tables landed earlier this session (previously tracked as
+`PENDING_ACTIONS.md` #4).
+
+- **`model.py`** — wraps `cardiffnlp/twitter-xlm-roberta-base-sentiment`, a pretrained XLM-RoBERTa-based
+  3-class classifier, spec §16's stated model choice ("Possible model: XLM-RoBERTa-based sentiment
+  classifier"). Handles Arabic, English, and mixed content with no per-language routing — the whole
+  point of a multilingual model.
+- **A real ordering bug avoided by testing, not caught by inspection.** My first instinct was to
+  hardcode `{0: "negative", 1: "neutral", 2: "positive"}` since that's what I expected a standard
+  3-class sentiment head to use. Instead of assuming, I downloaded the real model and printed its
+  actual `config.id2label` before writing any label-mapping code — it *is* `{0: 'negative', 1:
+  'neutral', 2: 'positive'}` for this specific model, but there was no guarantee of that going in, and
+  a different checkpoint (or a future model swap via `SENTIMENT_MODEL`) could easily use a different
+  order. `model.py` reads `id2label` from the loaded model at runtime instead of hardcoding it,
+  specifically because this same track already shipped one ordering-assumption bug this session (the
+  NER regex alternation-order bug that made `INVOICE_ID` extraction return `"oice"`). Verified the
+  classifier itself on real (not synthetic) English and Arabic text, including code-switching-adjacent
+  cases: "This product is amazing, I love it!" → 94.8% positive; "خدمة سيئة جدا ولن أشتري مرة أخرى"
+  (very bad service, won't buy again) → 94.8% negative; "التوصيل كان سريعا وممتازا" (delivery was fast
+  and excellent) → 83.1% positive; a genuinely lukewarm English sentence → 53.0% neutral (correctly the
+  plurality class, not a coin-flip).
+- **`data_access.py`** — reads unanalyzed reviews (ALLOWED-source, non-empty text only, matching spec
+  §13's Collection Policy Engine that every other data_access.py in this track already respects), and
+  aggregates already-analyzed `sentiment_results` per subject (product/competitor/business-overall),
+  including the continuous sentiment score spec §16 explicitly allows: `avg(positive_probability) −
+  avg(negative_probability)`, weighted by each label group's count.
+- **`cold_start.py`** — spec §16, verbatim: "If a country has insufficient review data, the system
+  must display LOW SAMPLE SIZE" and "must not present a statistically weak result as a reliable market
+  conclusion." Applied per-subject rather than strictly per-country — `reviews` has no country column,
+  so a stricter per-country cut would need either a `products`-level country field that doesn't exist
+  yet or joining through `competitors.country_code` for competitor-subject reviews only; scoped to
+  what the current schema actually supports rather than half-implementing per-country splitting for
+  one subject type and not the others.
+- **`pipeline.py`** — deliberately two entry points instead of one: `classify_and_store_reviews()` is
+  bulk/background labeling (writes raw `sentiment_results` rows only, no evidence — an unanalyzed
+  review being classified isn't itself a conclusion surfaced to anyone); `get_subject_sentiment_summary()`
+  aggregates already-analyzed sentiment for one subject and is the only function that writes to
+  `evidence_records` (category `FACT`, or `UNKNOWN` for a subject with zero analyzed reviews) — this
+  split mirrors the "raw model artifact vs. user-facing evidence" separation already established in
+  `rag/` (embeddings aren't evidence-bearing; retrieval results are what's actually surfaced).
+
+**Testing.** 20 new tests: 3 offline `cold_start.py` tests, 6 offline `model.py` tests (mocking the
+transformer entirely — including one that deliberately puts "positive" at index 0 in a fake
+`id2label`, to prove `classify()` doesn't fall back to any hardcoded order even by accident), 5
+offline `pipeline.py` tests (data access/model/evidence all mocked), and 6 live-DB integration tests
+against a disposable `pgvector/pgvector:pg15` container running the real `init_schema.sql` — these
+patch `model.classify()` with a deterministic fake (the model's own correctness is what the opt-in
+real-model tests below cover; re-downloading/running a 1.1GB transformer for every DB test would be
+slow for no additional signal). Ran the live-DB suite twice in a row without resetting the database to
+confirm idempotency (fresh `uuid.uuid4()` tenant per test, same pattern already established for the
+pricing/forecasting integration tests) — both runs passed. Separately, ran the real, undownloaded
+model (`AI_TEST_SENTIMENT=1`) against `test_sentiment_model_real.py`'s 6 tests, including the Arabic
+cases above — all passed.
+
+**Full suite: 186 tests total** (160 previously + 26 new: 3 `cold_start.py` + 6 `model.py` + 5
+`pipeline.py` offline, 6 live-DB integration, 6 opt-in real-model). Ran the full offline + live-DB
+suite (`AI_TEST_DATABASE_URL` set, `AI_TEST_SENTIMENT` unset) twice to confirm no regressions from
+adding `transformers`/`sentencepiece`/`protobuf` to `requirements.txt`: 160 passed both times (20
+pre-existing tests needing MinIO/Redis/the real embedding model skipped, same as they'd skip without
+this change — not re-verified this round since nothing here touches those paths), 0 failed. `flake8`
+clean.
+
+`transformers`, `sentencepiece`, and `protobuf` added to `src/ai/requirements.txt` — `transformers`
+was already a transitive dependency via `sentence-transformers` but is now imported directly by
+`sentiment/model.py`; `sentencepiece`/`protobuf` are XLM-RoBERTa's slow-tokenizer requirements
+(`AutoTokenizer.from_pretrained` fails on this model architecture without them — found by testing, not
+by reading the model card).
+
+No event contract exists yet for triggering sentiment analysis on new reviews (checked
+`src/infrastructure/init_broker.py` — no `ceopro:stream:*` topic provisioned for it), so — same
+situation as `pricing/` — this is called directly rather than via a Redis consumer for now.
+
+## 2026-08-07 — Post-merge integrity check: real Redis topic-name break found and fixed in `forecasting/consumer.py`
+
+After PR #5 (cross-currency pricing) merged, pulled `main` to rebase PR #6 (sentiment analysis) and
+ran a full sanity/integrity sweep over what else had landed on `main` in the meantime (five new infra
+commits: CI workflow changes, a telemetry/Loki/Promtail stack, an `.env.example` update, and a new
+`src/infrastructure/database/seed_demo_data.py`).
+
+**Real, currently-broken bug found in our own code — fixed, not just flagged.** One of those commits
+rewrote `src/infrastructure/init_broker.py` to provision `ceopro:stream:demand_forecast_requested`
+(previously `ceopro:stream:forecast_requested`) — matching `DATA_OWNERSHIP_AND_CONTRACTS.md`'s Event B
+name exactly, which the old topic name didn't. `src/ai/forecasting/consumer.py` still hardcoded the
+old name, so it would silently listen on a stream nothing publishes to anymore, and the demand-forecast
+Redis pipeline would deliver zero events with no error anywhere. This is `src/ai/`'s own file, not
+infra's, so fixed directly (not just logged in `PENDING_ACTIONS.md`) — `stream_key` now matches the
+name `init_broker.py` actually provisions. Verified end-to-end against a real disposable Redis: ran the
+actual `init_broker.py` topic-creation logic, then constructed `ForecastRequestConsumer` and confirmed
+its consumer group registers on the same stream the broker init step creates (previously this would
+have silently diverged) — `xinfo_groups()` on the broker-provisioned stream shows the consumer's group.
+`test_consumer.py`'s 10 tests all reference `consumer.stream_key` rather than a hardcoded string, so no
+test logic needed to change, just a docstring comment.
+
+**Also re-confirmed (not new, not caused by AI/ML work, logged in `PENDING_ACTIONS.md` #8):**
+`staging-deployment.yml` was touched by two of the five new commits (CI restructuring), but still
+imports `src.ai.main`/`src.backend.main` and builds `Dockerfile.ai` — none of which exist anywhere in
+the repo on any branch. The underlying problem is unchanged despite the surrounding YAML being
+rewritten twice.
+
+**Not touched (infra-owned, out of scope):** the new `seed_demo_data.py`, the Loki/Promtail/Grafana
+stack, and `.env.example` — briefly reviewed for anything affecting `src/ai/` specifically (schema
+column names our `data_access.py` files depend on, env vars our modules read) and found nothing that
+changes anything here.
+
+**Full suite after the merge + fix: 186 tests, all passing** (170 run with `AI_TEST_DATABASE_URL` +
+`AI_TEST_REDIS_HOST` set against real disposable Postgres/Redis containers running the real schema and
+the real (fixed) consumer; 16 skipped — real-model/embedding/MinIO-gated tests not re-verified this
+round since nothing here touches those paths). `flake8` clean.
+
+## 2026-08-07 — Second pull for PR #6: six more team commits landed, three carried real (unverified) fixes
+
+Pulled `main` again to rebase PR #6 after it started conflicting a second time. Six new commits had
+landed since the previous pull: two CI restructurings (already covered above), one telemetry/Loki
+stack addition, a `.env.example`/`security.py` "purge hardcoded fallbacks" commit, and — the ones that
+mattered — a manual edit to `PENDING_ACTIONS.md` that deleted items #1 (pgvector image), #2 (RLS), and
+#3 (currency_rates) outright, alongside four new commits claiming to fix exactly those things: a
+pgvector image "upgrade," row-level-security migrations, and new market-intelligence tables.
+
+**Verified each claim empirically before trusting the deletion — two of the three were still broken.**
+
+- **pgvector image "upgrade" (`a3eabbc`): still the same invalid tag.** `docker-compose.yml`'s
+  `postgres` image changed from `postgres:15-alpine` to `pgvector/pgvector:15-pgorg` — but that's the
+  *exact same broken tag* this track already flagged and confirmed doesn't exist (re-confirmed again
+  via `docker pull`: `failed to resolve reference ... not found`). The commit message ("upgrade
+  relational image layer targeting automated pgvector engine structures") describes a fix that didn't
+  actually happen. Restored item #1 with this finding rather than accepting the deletion.
+- **RLS migration (`5eff136`): doesn't fix the root cause, and errors out partway through.** A new
+  `migrations/20260807230419_add_row_level_security.sql` adds RLS to 8 more tables — but it's the same
+  shape of policy as before (`USING (tenant_id = current_setting(...))`, no `FORCE ROW LEVEL SECURITY`),
+  so the owner-bypass this track already found and confirmed (Postgres exempts the table owner from RLS
+  by default, and the app connects as that role) is untouched. Applied it for real against a fresh copy
+  of the actual schema to check: it also references `ai_recommendations`, a table that doesn't exist
+  anywhere in `init_schema.sql`, so two of its eight `ALTER TABLE`/`CREATE POLICY` pairs fail outright.
+  Restored item #2 with both findings.
+- **Market intelligence tables (`e79f179`/`f71bf2c`): the tables are real, but duplicated and
+  unreachable.** `news_record`/`social_mention`/`extracted_entity` are now defined — but as two
+  byte-identical migration files (a likely accidental double-commit), and like every other migration
+  file in this new `migrations/` folder, nothing applies them to a running database. Confirmed all of
+  this by actually building the full sequence: loaded the real `init_schema.sql` into a fresh disposable
+  Postgres container, then applied all four new migration files in filename order. Campaigns migration:
+  clean. RLS migration: 3 of 4 remaining pairs succeed, `ai_recommendations` pair fails as predicted.
+  First market-intelligence migration: clean, all three tables + four indexes created. Second
+  (duplicate) market-intelligence migration: fails immediately (`relation "news_record" already
+  exists`), confirming the duplicate-file bug is real, not just a suspicion from reading two identical
+  diffs.
+- **The broader pattern, now stated explicitly as its own item (#22):** confirmed via a repo-wide
+  search that *nothing* — not `docker-compose.yml`, not any CI workflow, not any script — ever applies
+  `init_schema.sql` or this new `migrations/` folder to a running database. Every "schema landed but not
+  deployable" finding this track has made (pgvector, RLS, and now the market-intelligence tables) traces
+  back to this one missing piece. Logged as the highest-leverage single fix available to unblock all
+  three at once.
+
+Restored `PENDING_ACTIONS.md`'s deleted rows rather than accepting the deletion, per the file's own
+stated convention ("don't delete the row, update status in place") — updated #1/#2/#4 with the findings
+above, kept #3/#5/#18/#19 as they were, and added #20 (duplicate migration files), #21 (RLS migration's
+missing-table reference), and #22 (nothing applies any migration). None of this required touching
+`src/ai/` beyond re-running the existing suite as a regression check (134 passed, 52 skipped offline —
+consistent, no regressions from the merge itself).
 
 ## How to add an entry
 

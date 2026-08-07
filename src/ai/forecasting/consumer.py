@@ -2,7 +2,7 @@
 CEOPRO AI - Demand Forecast Request Consumer.
 Consumes the `demand_forecast_requested` event contract (see
 src/infrastructure/DATA_OWNERSHIP_AND_CONTRACTS.md, Event B) from the
-`ceopro:stream:forecast_requested` topic already provisioned by
+`ceopro:stream:demand_forecast_requested` topic provisioned by
 src/infrastructure/init_broker.py, and runs the forecasting pipeline.
 
 This is a separate consumer from src/infrastructure/messaging/ai_consumer.py,
@@ -30,7 +30,7 @@ class ForecastRequestConsumer:
         self.host = host or os.getenv("REDIS_HOST", "localhost")
         self.port = port or int(os.getenv("REDIS_PORT", "6379"))
         self.group_id = "ceopro-ai-forecast-engine"
-        self.stream_key = "ceopro:stream:forecast_requested"
+        self.stream_key = "ceopro:stream:demand_forecast_requested"
         self.consumer_name = f"ai-forecast-node-{os.getpid()}"
 
         self.db_url = os.getenv("DATABASE_URL")

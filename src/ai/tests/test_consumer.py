@@ -6,7 +6,7 @@ mock-based unit test the way test_pipeline.py's DB tests are.
 
 Skipped automatically unless AI_TEST_REDIS_HOST is set, so it never runs in CI
 or requires Docker on every machine. Point it at a disposable Redis - tests
-create/use a real consumer group on ceopro:stream:forecast_requested.
+create/use a real consumer group on ceopro:stream:demand_forecast_requested.
 """
 
 import os
