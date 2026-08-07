@@ -765,6 +765,37 @@ duplicate row and the false-claim content), re-applied on top of the current `ma
 were touched by the false-claim commit, so nothing else needed correcting. This is purely a
 documentation-accuracy fix — no code, schema, or test changes.
 
+## 2026-08-08 — Recovered two still-valid findings from a stale, unmergeable PR; added to `PENDING_ACTIONS.md`
+
+After PR #7 merged, checked whether the other still-open PR (#4, "post-merge integration check -
+RLS/pgvector/infra findings", opened before this session's current work) was still relevant. Its
+merge-base with `main` was `7ec2f2b` — from before PR #5/#6/#7 and roughly 15 other commits — and
+simulating the merge produced conflicts in both `AI_PROGRESS.md` and `PENDING_ACTIONS.md`, plus a
+genuine numbering collision: PR #4's own items #18/#19/#20 (ai_consumer.py, staging-deployment.yml,
+.env.example) are completely different findings from what this track has since assigned those same
+numbers to. Merging it as-is wasn't viable.
+
+Rather than discard it, read through its four findings and re-verified each against the current
+codebase instead of assuming stale = wrong:
+
+- RLS owner-bypass and the pgvector image tag: already captured, more thoroughly, in this track's
+  current items #1/#2.
+- `staging-deployment.yml` hardcoded `JWT_SECRET`/`DATABASE_URL` in the YAML: **no longer present** —
+  confirmed via grep against the current file. Superseded by the later CI rewrites, correctly not
+  re-added.
+- `ai_consumer.py`'s hardcoded credential fallback and hardcoded `job_id`: **still present, still
+  broken**. Reproduced the exact insert (`job_id = '00000000-0000-0000-0000-000000000000'::uuid`)
+  against a real disposable Postgres running the current schema and confirmed it violates the
+  `fk_staging_job` foreign key constraint every time. Since the message-processing loop catches and
+  rolls back on any exception, this doesn't crash — it just means the consumer has a 100% silent
+  failure rate on every message it's ever processed. Added as new item #23.
+- `.env.example` missing `GRAFANA_ADMIN_USER`/`GRAFANA_ADMIN_PASSWORD`: **still true**, and now more
+  relevant than when PR #4 found it, since `docker-compose.yml` gained a real dependency on both vars
+  with the Loki/Promtail/Grafana telemetry stack added earlier this session. Added as new item #24.
+
+No `src/ai/` code was touched — this was purely re-verifying and re-filing findings from a PR that
+can no longer be merged cleanly. Recommend closing PR #4 as superseded once these are confirmed landed.
+
 ## How to add an entry
 
 1. New date-stamped `##` section at the bottom (never edit history).
