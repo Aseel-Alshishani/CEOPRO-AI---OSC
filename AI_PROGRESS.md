@@ -424,8 +424,61 @@ swap to `pgvector/pgvector:pg15`, confirmed it pulls and would resolve #17) but 
 infra files alone for now. Both remain open in `PENDING_ACTIONS.md`, unstarted.
 
 **Full suite: 141 tests** (5 new regression tests added). Verified three ways: no live infra (104
-pass, 37 skip), Postgres up (121 pass, 20 skip). `flake8` clean. This work is on a new branch,
-`claude/ai-schema-conflict-fixes` (off latest `main`, since PR #2 already merged) — not yet a PR.
+pass, 37 skip), Postgres up (121 pass, 20 skip). `flake8` clean. This work is on branch
+`claude/ai-schema-conflict-fixes` (off latest `main`, since PR #2 already merged) — opened as
+[PR #3](https://github.com/Huda-Hassouneh/CEOPRO-AI/pull/3).
+
+## 2026-08-07 — Exhaustive line-by-line audit of every module against the live schema; 3 more real bugs found
+
+Asked to "track every line and every output" and check for any other issues, on top of the schema-
+conflict fixes above (same PR #3 branch, not a new one — still under review). Re-read every source
+file in `forecasting/`, `pricing/`, `rag/`, and `extraction/` fresh against the current, real schema
+(quoted in full at the top of this entry's investigation, not from memory), rather than assuming the
+earlier fixes covered everything.
+
+**`forecasting/`, `pricing/`, `rag/`**: no new bugs found. Re-verified every query against every
+table it touches (`transactions`, `inventory`, `competitor_prices`, `evidence_records`,
+`demand_forecasts`, `recommendation_outcomes`, `model_versions`, `rag_documents_metadata` — all
+unchanged by the schema update) and re-checked edge cases in `baselines.py`, `model.py`,
+`recommendation.py`, `guardrails.py`, `hybrid_retrieval.py`, `faiss_index.py`. All sound.
+
+**`extraction/regex_patterns.py`: three more real bugs**, found by testing actual behavior against
+realistic text, not by reading the regex and assuming it was right:
+
+1. **`_DISCOUNT_PATTERN` was case-sensitive in a way that missed common phrasing.** It hardcoded
+   `off|discount|OFF|DISCOUNT` instead of using `re.IGNORECASE`, so title-case marketing text like
+   "Big 30% Off Sale" or "Get 15% Discount today" silently didn't match, while `"20% off"` and
+   `"20% OFF"` did. Fixed: single case-insensitive pattern.
+
+2. **`INVOICE_ID`/`ORDER_ID` extraction had a false-positive bug serious enough to matter**: with
+   `re.IGNORECASE`, the shorter alternative in `(?:INV|INVOICE)` matched as a *prefix of the plain
+   English word* "invoice" itself, with the rest of the word ("oice") captured as a fake ID. Verified:
+   `extract_invoice_id("Please send me my invoice")` returned an `INVOICE_ID` entity with value
+   `"oice"`. Root cause was two compounding issues: (a) alternation tried the short form before the
+   long form, and (b) the ID-capture group (`[A-Z0-9]{3,}`) matched *any* 3+-letter word
+   case-insensitively, not just genuine ID-shaped tokens — so even a correctly-scoped label match
+   would go on to capture the next ordinary word ("amount", "today") as if it were the ID. Fixed both:
+   reordered the alternation (`INVOICE|INV`), and required the captured group to contain at least one
+   digit (`(?=[A-Z0-9]*\d)[A-Z0-9]{3,}`) — real IDs always have one, ordinary words never do. Verified
+   the fix doesn't regress genuine matches (`"INV-20458"`, `"INV20458"`, `"ORDER: ORD99231"`, etc.)
+   and does suppress the false positives (`"invoice"`, `"invoicing"`, `"the order was placed"`,
+   `"in order to proceed"`, `"reorder level"`, `"disorder"`).
+
+3. **`extract_money` only handled amount-then-code ("18.00 JOD"), never code-then-amount
+   ("JOD 18.00")** — a gap, not a false positive, but a real one: code-before-amount is at least as
+   common a convention as code-after for the MENA currencies this platform targets (spec §9), and
+   `"JOD 18.00"`, `"SAR 500"`, `"AED 1,250.00"` all silently extracted nothing. Added a second pattern
+   for the code-before ordering.
+
+All three were confirmed with direct interpreter testing before touching the source (not assumed from
+reading the regex), and each got a targeted regression test rather than a vague "does it work now"
+check: 7 new tests (1 case-insensitivity, 2 false-positive-suppression, 2 real-match-preservation,
+2 code-before-amount).
+
+**Full suite: 148 tests, run with every live service up simultaneously** (Postgres with the real
+current schema, Redis, MinIO, and the real embedding model, all at once for the first time this
+session) — confirms nothing regressed across the whole module set together, not just per-module in
+isolation. `flake8` clean. All still on `claude/ai-schema-conflict-fixes` / PR #3.
 
 ## How to add an entry
 
