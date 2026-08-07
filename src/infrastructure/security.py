@@ -1,4 +1,3 @@
-$content = @'
 import hmac
 import os
 from fastapi import Request, HTTPException, Security
@@ -36,14 +35,3 @@ async def verify_internal_service_token(request: Request, token: str = Security(
         status_code=403,
         detail=f"Security Refused: Missing or invalid {INTERNAL_TOKEN_NAME}. Unauthorized internal access."
     )
-'@
-
-$targetPath = "$PWD\src\infrastructure\security.py"
-$targetDir = Split-Path $targetPath
-
-if (!(Test-Path $targetDir)) {
-    New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
-}
-
-[System.IO.File]::WriteAllText($targetPath, $content, (New-Object System.Text.UTF8Encoding($false)))
-Write-Host "security.py updated successfully"
