@@ -1,8 +1,7 @@
-@'
-"""
+
 CEOPRO AI - Automated Asynchronous Telemetry Watchdog Core.
 Executes non-blocking multi-threaded endpoint auditing loops.
-"""
+
 
 import json
 import logging
@@ -111,4 +110,4 @@ class InfrastructureWatchdog:
 if __name__ == "__main__":
     watchdog = InfrastructureWatchdog()
     watchdog.run_checks()
-'@ | Out-File -FilePath src/infrastructure/monitoring/watchdog.py -Encoding utf8
+
