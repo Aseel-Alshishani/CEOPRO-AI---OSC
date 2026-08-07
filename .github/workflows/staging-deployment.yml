@@ -26,7 +26,7 @@ jobs:
       - name: Install Hardened Testing Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install flake8 pytest
+          pip install flake8 pytest fastapi pydantic
 
       - name: Enforce Strict Linting Standards
         run: |
@@ -96,6 +96,41 @@ jobs:
     steps:
       - name: Checkout Code Repository Cluster
         uses: actions/checkout@v3
+
+      - name: Initialize Enterprise Python Environment
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Architecture Contract Specifications
+        run: |
+          python -m pip install --upgrade pip
+          pip install fastapi pydantic
+
+      - name: Run Dynamic Artifacts Documentation Engine
+        env:
+          JWT_SECRET: "production_immutable_documentation_extraction_fallback_token_2026"
+          DATABASE_URL: "postgresql://cluster_fallback_user:secure_fallback_gate@localhost:5432/ceopro_platform"
+        run: |
+          python -c "
+          import json, os, sys
+          from importlib import import_module
+          def run_ext(ns, inst, out):
+              try:
+                  m = import_module(ns)
+                  a = getattr(m, inst)
+                  s = a.openapi()
+                  os.makedirs(os.path.dirname(out), exist_ok=True)
+                  with open(out, 'w', encoding='utf-8') as f:
+                      json.dump(s, f, indent=2, ensure_ascii=False)
+                  print(f'Serialized: {out}')
+              except Exception as e:
+                  sys.stderr.write(f'Error {ns}: {str(e)}\n')
+                  sys.exit(1)
+          run_ext('src.backend.main', 'app', 'src/infrastructure/documentation/specs/backend_openapi.json')
+          run_ext('src.ai.main', 'app', 'src/infrastructure/documentation/specs/ai_service_openapi.json')
+          "
 
       - name: Dispatch Secure Deployment Payload via SSH Gate
         uses: appleboy/ssh-action@master
