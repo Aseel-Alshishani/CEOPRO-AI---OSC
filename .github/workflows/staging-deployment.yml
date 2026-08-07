@@ -6,7 +6,7 @@ on:
       - main
 
 permissions:
-  contents: read
+  contents: write
   packages: write
   security-events: write
 
@@ -16,6 +16,9 @@ jobs:
     steps:
       - name: Checkout Code Repository Cluster
         uses: actions/checkout@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
       - name: Initialize Enterprise Python Environment
         uses: actions/setup-python@v4
@@ -52,6 +55,43 @@ jobs:
           format: 'table'
           exit-code: '1'
           severity: 'CRITICAL,HIGH'
+
+      - name: Run Dynamic Artifacts Documentation Engine
+        env:
+          JWT_SECRET: "production_immutable_documentation_extraction_fallback_token_2026"
+          DATABASE_URL: "postgresql://cluster_fallback_user:secure_fallback_gate@localhost:5432/ceopro_platform"
+        run: |
+          python -c "
+          import json, os, sys
+          from importlib import import_module
+          def run_ext(ns, inst, out):
+              try:
+                  m = import_module(ns)
+                  a = getattr(m, inst)
+                  s = a.openapi()
+                  os.makedirs(os.path.dirname(out), exist_ok=True)
+                  with open(out, 'w', encoding='utf-8') as f:
+                      json.dump(s, f, indent=2, ensure_ascii=False)
+                  print(f'Serialized: {out}')
+              except Exception as e:
+                  sys.stderr.write(f'Error {ns}: {str(e)}\n')
+                  sys.exit(1)
+          run_ext('src.backend.main', 'app', 'src/infrastructure/documentation/specs/backend_openapi.json')
+          run_ext('src.ai.main', 'app', 'src/infrastructure/documentation/specs/ai_service_openapi.json')
+          "
+
+      - name: Automatically Commit and Push OpenAPI JSON Specs Back to Repo
+        run: |
+          git config --global user.name "ceopro-devops-automation"
+          git config --global user.email "devops@ceopro.ai"
+          git add src/infrastructure/documentation/specs/*.json
+          if git diff --staged --quiet; then
+            echo "No contract schema mutations detected. Skipping auto-commit sequence."
+          else
+            git commit -m "docs(contract): auto-generate dynamic openapi spec json artifacts [skip ci]"
+            git pull --rebase origin main
+            git push origin main
+          fi
 
       - name: Archive Enterprise Security Audit Artifacts
         if: always()
@@ -141,30 +181,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install fastapi pydantic
-
-      - name: Run Dynamic Artifacts Documentation Engine
-        env:
-          JWT_SECRET: "production_immutable_documentation_extraction_fallback_token_2026"
-          DATABASE_URL: "postgresql://cluster_fallback_user:secure_fallback_gate@localhost:5432/ceopro_platform"
-        run: |
-          python -c "
-          import json, os, sys
-          from importlib import import_module
-          def run_ext(ns, inst, out):
-              try:
-                  m = import_module(ns)
-                  a = getattr(m, inst)
-                  s = a.openapi()
-                  os.makedirs(os.path.dirname(out), exist_ok=True)
-                  with open(out, 'w', encoding='utf-8') as f:
-                      json.dump(s, f, indent=2, ensure_ascii=False)
-                  print(f'Serialized: {out}')
-              except Exception as e:
-                  sys.stderr.write(f'Error {ns}: {str(e)}\n')
-                  sys.exit(1)
-          run_ext('src.backend.main', 'app', 'src/infrastructure/documentation/specs/backend_openapi.json')
-          run_ext('src.ai.main', 'app', 'src/infrastructure/documentation/specs/ai_service_openapi.json')
-          "
 
       - name: Dispatch Secure Deployment Payload via SSH Gate
         uses: appleboy/ssh-action@master
