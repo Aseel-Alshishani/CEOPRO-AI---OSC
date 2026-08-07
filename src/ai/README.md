@@ -98,4 +98,5 @@ docker rm -f ceopro_redis_aitest
 ```
 
 See [`AI_PROGRESS.md`](../../AI_PROGRESS.md) at the repo root for the dated log of what's been built,
-what tests found, and what's still blocked.
+what tests found, and what's still blocked. Items that need action from another team or a human
+outside this track are tracked separately in [`PENDING_ACTIONS.md`](../../PENDING_ACTIONS.md).

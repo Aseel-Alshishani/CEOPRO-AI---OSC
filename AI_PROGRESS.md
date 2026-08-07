@@ -9,6 +9,9 @@ convention in `AI_PLAN_AND_CONTRACT_UPDATES.md` and `src/infrastructure/CONTRACT
 This file lives at the repo root so it stays alongside `MASTER_SPEC_v4.md` and
 `AI_PLAN_AND_CONTRACT_UPDATES.md`. Module-level implementation detail lives in
 [`src/ai/README.md`](src/ai/README.md); this file tracks status and history, not how the code works.
+Anything that needs action from a different team or a human outside this track (schema asks,
+ownership decisions, broken CI references, security flags) is **not** duplicated here — it's tracked
+in [`PENDING_ACTIONS.md`](PENDING_ACTIONS.md) so it stays visible without digging through this log.
 
 ---
 
