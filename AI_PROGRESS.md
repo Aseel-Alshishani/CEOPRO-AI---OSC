@@ -128,6 +128,29 @@ handling, and its `finally`-block cleanup — only the per-message handling logi
 Low risk (it's a thin wrapper around already-tested pieces) but worth naming explicitly rather than
 leaving it implied.
 
+## 2026-08-07 — `listen()` loop coverage gap (flagged in the previous entry) closed
+
+The previous entry named an explicit gap: `listen()`'s own `while True` loop, `KeyboardInterrupt`
+handling, and `finally`-block cleanup weren't tested, only the per-message logic it calls. Closed
+that with 4 more tests in `test_consumer.py`, using the already-live disposable Redis container plus
+`psycopg2.connect` mocked out (no live Postgres needed for these):
+
+- `xreadgroup` raising `KeyboardInterrupt` (simulating Ctrl+C during the blocking read) is caught
+  internally — `listen()` doesn't raise — and both the DB connection and the Redis client get
+  `.close()`d in the `finally` block.
+- An empty `xreadgroup` response (`[]`, i.e. the poll timed out with nothing new) doesn't stop the
+  loop — it just polls again.
+- A malformed message (missing `tenant_id`) inside the loop triggers a rollback and the loop
+  continues to the next poll, without the bad message ever being acked.
+- A successfully processed message is acked exactly once, with the right stream/group/message-id
+  arguments, and does not trigger a rollback.
+
+All 4 passed. Full suite is now 41 tests (26 offline, 5 live-Postgres, 10 live-Redis). Verified: with
+only Redis available (no `AI_TEST_DATABASE_URL`), 36 pass and 5 skip; with neither live-infra env var
+set, all 26 offline tests pass and the remaining 15 skip cleanly. `flake8` clean on both checks.
+
+No further known test gaps in `src/ai/forecasting/` as of this entry.
+
 ## How to add an entry
 
 1. New date-stamped `##` section at the bottom (never edit history).

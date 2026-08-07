@@ -10,7 +10,7 @@ create/use a real consumer group on ceopro:stream:forecast_requested.
 """
 
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import redis
@@ -95,3 +95,61 @@ def test_full_publish_consume_ack_cycle_matches_listen_loop_mechanics(consumer, 
 
     pending = redis_client.xpending(consumer.stream_key, consumer.group_id)
     assert pending["pending"] == 0  # message was acked, nothing left outstanding
+
+
+def test_listen_closes_db_and_redis_on_keyboard_interrupt(consumer):
+    """
+    listen()'s own while-loop, KeyboardInterrupt handling, and finally-block
+    cleanup - previously untested (only the per-message logic it calls was
+    covered). xreadgroup raising KeyboardInterrupt simulates Ctrl+C landing
+    during the blocking read.
+    """
+    fake_db_conn = MagicMock()
+    consumer.client.xreadgroup = MagicMock(side_effect=KeyboardInterrupt)
+
+    with patch("src.ai.forecasting.consumer.psycopg2.connect", return_value=fake_db_conn):
+        consumer.listen()  # must not raise - KeyboardInterrupt is caught internally
+
+    fake_db_conn.close.assert_called_once()
+
+
+def test_listen_continues_past_empty_responses(consumer):
+    """An empty xreadgroup response (timeout, no messages) must not stop the loop."""
+    fake_db_conn = MagicMock()
+    consumer.client.xreadgroup = MagicMock(side_effect=[[], [], KeyboardInterrupt])
+
+    with patch("src.ai.forecasting.consumer.psycopg2.connect", return_value=fake_db_conn):
+        consumer.listen()
+
+    assert consumer.client.xreadgroup.call_count == 3
+    fake_db_conn.close.assert_called_once()
+
+
+def test_listen_rolls_back_and_continues_on_message_processing_error(consumer):
+    """A malformed message must not crash the loop - it should roll back and move on."""
+    fake_db_conn = MagicMock()
+    malformed_response = [(consumer.stream_key, [("123-0", {"product_id": "p1"})])]  # missing tenant_id
+    consumer.client.xreadgroup = MagicMock(side_effect=[malformed_response, KeyboardInterrupt])
+    consumer.client.xack = MagicMock()
+
+    with patch("src.ai.forecasting.consumer.psycopg2.connect", return_value=fake_db_conn):
+        consumer.listen()
+
+    fake_db_conn.rollback.assert_called_once()
+    consumer.client.xack.assert_not_called()  # a message that raised must not be acked
+    fake_db_conn.close.assert_called_once()
+
+
+def test_listen_acks_only_after_successful_processing(consumer):
+    fake_db_conn = MagicMock()
+    good_response = [(consumer.stream_key, [("124-0", {"tenant_id": "t1", "product_id": "p1"})])]
+    consumer.client.xreadgroup = MagicMock(side_effect=[good_response, KeyboardInterrupt])
+    consumer.client.xack = MagicMock()
+
+    with patch("src.ai.forecasting.consumer.psycopg2.connect", return_value=fake_db_conn), \
+         patch("src.ai.forecasting.consumer.run_forecast") as mock_run_forecast:
+        consumer.listen()
+
+    mock_run_forecast.assert_called_once_with(fake_db_conn, "t1", "p1", 7)
+    consumer.client.xack.assert_called_once_with(consumer.stream_key, consumer.group_id, "124-0")
+    fake_db_conn.rollback.assert_not_called()
