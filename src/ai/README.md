@@ -67,6 +67,31 @@ Only handles spec §19's "LOCAL MARKET COMPARISON" (same currency) — "CROSS-CO
 `currency_rates`, which doesn't exist (see blockers below). CPU-only, no ML model at all currently —
 purely rule-based per spec's explicit cold-start requirement for pricing.
 
+### `rag/` — Phase 3 groundwork, retrieval only (spec §4, §6, §21)
+
+Implements document ingestion and lexical (BM25) retrieval against the existing
+`rag_documents_metadata` table and the `ceopro-rag-knowledge` MinIO bucket — no schema changes.
+**Not** the full RAG chatbot: no semantic (embedding/FAISS) retrieval, no LLM reasoning step, no chat
+history persistence (would need a new table). CPU-only, no transformer model at all — the lightest
+tier of the stack, by design, since neither pgvector nor a chat-history table exist yet.
+
+- `chunking.py` — word-boundary overlapping-window text chunking. Works for Arabic and English alike
+  (no language-specific tokenizer, spec §8's Arabic-English code-switching requirement).
+- `bm25_index.py` — in-memory BM25 index (`rank_bm25`, pure Python, no ML model). Uses **BM25Plus**,
+  not the more common BM25Okapi — see the note in the file: Okapi's IDF formula is exactly zero for
+  any term appearing in precisely half a small corpus, which silently zeroed out obvious matches for
+  tenants with only 2-3 documents (a realistic cold-start state). Found via the live-MinIO
+  integration test, not by code review.
+- `data_access.py` — reads/updates `rag_documents_metadata`, fetches raw MinIO object bytes. Handles
+  plain-text (`.txt`) content only — PDF/DOCX extraction isn't implemented (flagged in
+  `PENDING_ACTIONS.md`).
+- `pipeline.py` — `ingest_pending_documents()` (fetch → chunk-check → mark Processed/Failed, never
+  silently drops a document per spec §12) and `build_tenant_index()` (rebuild a BM25 index from every
+  Processed document's *current* MinIO content, since there's no `knowledge_chunks` table to persist
+  chunk text in — chunks aren't stored anywhere of their own, they're recomputed on every retrieval
+  call). That's correct but doesn't scale, which is itself a concrete argument for the pgvector ask
+  in `PENDING_ACTIONS.md` #1, not just a workaround for its absence.
+
 ### Known upstream blockers (not fixed here — flagged in [`PENDING_ACTIONS.md`](../../PENDING_ACTIONS.md))
 
 - No real transaction volume yet (`mocks/sales_transactions_mock.csv` has 3 rows) — `forecasting/`'s
@@ -81,6 +106,9 @@ purely rule-based per spec's explicit cold-start requirement for pricing.
   not enforce a real margin floor as spec §19 also asks for.
 - pgvector / `knowledge_chunks` / Row-Level Security / `currency_rates` remain infra-owned blocking
   asks for later phases (RAG chatbot, cross-currency pricing) — out of scope for this module.
+- `rag/data_access.py` decodes MinIO objects as plain UTF-8 text only — PDF/DOCX documents (which
+  `MINIO_STORAGE_ARCHITECTURE.md` explicitly expects in `ceopro-rag-knowledge`) aren't extracted.
+- No chat-history table exists, so RAG conversation persistence isn't implemented.
 
 ## Running tests
 
@@ -125,6 +153,21 @@ unless `AI_TEST_REDIS_HOST` is set:
 docker run -d --name ceopro_redis_aitest -p 6380:6379 redis:7-alpine
 AI_TEST_REDIS_HOST=localhost AI_TEST_REDIS_PORT=6380 pytest src/ai/tests/test_consumer.py
 docker rm -f ceopro_redis_aitest
+```
+
+`test_rag_integration.py` covers `rag/data_access.py` and `rag/pipeline.py` against real Postgres
+*and* real MinIO together — skipped unless both `AI_TEST_DATABASE_URL` and `AI_TEST_MINIO_ENDPOINT`
+are set:
+
+```bash
+docker run -d --name ceopro_minio_aitest -p 9002:9000 \
+  -e MINIO_ROOT_USER=minio_admin -e MINIO_ROOT_PASSWORD=local_test_password_only \
+  minio/minio server /data
+# ... plus the disposable postgres container from above, with its schema loaded ...
+AI_TEST_DATABASE_URL="postgresql://ceopro_admin:local_test_password_only@localhost:5433/ceopro_platform" \
+AI_TEST_MINIO_ENDPOINT="localhost:9002" \
+  pytest src/ai/tests/test_rag_integration.py
+docker rm -f ceopro_minio_aitest
 ```
 
 See [`AI_PROGRESS.md`](../../AI_PROGRESS.md) at the repo root for the dated log of what's been built,

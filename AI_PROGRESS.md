@@ -20,7 +20,7 @@ in [`PENDING_ACTIONS.md`](PENDING_ACTIONS.md) so it stays visible without diggin
 | Spec phase | Module | Status | Notes |
 |---|---|---|---|
 | Phase 2 — Demand Intelligence (§18, §23, §25) | `src/ai/forecasting/` | 🟢 Built, tested (unit + integration) | Baselines, XGBoost + walk-forward validation, cold-start policy, evidence writers, Redis consumer. See entries below. |
-| Phase 3 — RAG Chatbot (§21) | — | ⚪ Not started | Blocked: needs pgvector + `knowledge_chunks` (infra-owned blocking ask, see `AI_PLAN_AND_CONTRACT_UPDATES.md`). |
+| Phase 3 — RAG Chatbot (§21) | `src/ai/rag/` | 🟡 Retrieval built/tested; chatbot itself not started | Document ingestion + BM25 lexical retrieval built against existing `rag_documents_metadata` + MinIO — doesn't need pgvector. Still missing: semantic/FAISS retrieval, LLM reasoning step, chat history (needs a new table). See entry below. |
 | Phase 4 — Market Intelligence (§15, §16, §17) | — | ⚪ Not started | Blocked: schema has no `reviews`/`news_record`/`social_mention`/`extracted_entity`/`sentiment_result` tables yet. |
 | Phase 5 — Price Intelligence (§19) | `src/ai/pricing/` | 🟢 Built, tested (unit + integration) | Product matching, rule-based recommendation, price-change guardrail, evidence + recommendation_outcomes writers. See entry below. Margin guardrails are weaker than spec'd — `products` has no cost column (`PENDING_ACTIONS.md` #14). Real competitor price data still doesn't exist (`PENDING_ACTIONS.md` #5), so the cold-start/UNKNOWN path is what actually runs today, same as Phase 2. |
 | Phase 6 — Competitor Ranking (§20) | — | ⚪ Not started | Same data gap as Phase 5 (`PENDING_ACTIONS.md` #5). |
@@ -204,6 +204,56 @@ violations introduced by this addition.
 - Nothing to actually run this against yet — `competitor_prices` is empty; the cold-start/`UNKNOWN`
   path is what executes today, same situation forecasting is in with real transaction volume (#5).
 - Cross-currency comparison isn't implemented — blocked on `currency_rates` (#3), same as before.
+
+## 2026-08-07 — Pinball Loss added; Phase 3 RAG retrieval groundwork built (CPU-only, no pgvector)
+
+Asked to prioritize and build everything possible without needing heavy compute (no GPU, nothing
+"super computer"-scale). Two pieces landed:
+
+**Pinball Loss** (`forecasting/evaluation.py`, spec §25's "Pinball Loss where applicable"): standard
+quantile-loss metric, added alongside MAE/RMSE/MASE. Not currently wired into `pipeline.py` — the
+forecaster produces point forecasts, not quantile forecasts, so there's nothing to score with it yet.
+It's there for when/if quantile regression is added. 5 new tests, all offline.
+
+**`src/ai/rag/`** (spec §4/§6/§21): document ingestion + BM25 lexical retrieval, deliberately **not**
+the full RAG chatbot. This is retrieval-only groundwork:
+
+- `chunking.py` — word-boundary overlapping chunking, works for Arabic and English without a
+  language-specific tokenizer.
+- `bm25_index.py` — BM25 index, `rank_bm25` (pure Python, no trained model, the lightest possible
+  tier).
+- `data_access.py` — reads/updates `rag_documents_metadata` (existing table), fetches raw bytes from
+  the `ceopro-rag-knowledge` MinIO bucket (existing, AI-owned per `MINIO_STORAGE_ARCHITECTURE.md`).
+  Plain-text only for now — PDF/DOCX extraction not implemented (new item, `PENDING_ACTIONS.md`).
+- `pipeline.py` — ingest (fetch → chunk-check → mark Processed/Failed, spec §12's "never silently
+  discard invalid data") and retrieval (rebuild a BM25 index from every Processed document's current
+  MinIO content). No `knowledge_chunks` table exists, so chunk text isn't persisted anywhere - the
+  index is recomputed from MinIO on every call. Documented plainly as a scaling limitation, and as a
+  concrete argument *for* the pgvector ask rather than a reason it's unnecessary.
+
+**A key finding: none of this needed pgvector.** `MASTER_SPEC_v4.md` §4 and §6 name **FAISS + BM25**
+as the platform's default retrieval stack - standalone libraries, not a Postgres extension. The
+pgvector/`knowledge_chunks` ask comes from the still-missing `AI_CONTRACT_CHANGES_AND_CLARIFICATIONS.md`,
+not the master spec itself. So lexical (BM25) retrieval was buildable today; semantic (embedding +
+FAISS) retrieval is a separate, still-open follow-up - lighter than an LLM, but not done in this pass.
+
+**Testing caught a real bug, again by running against real infra rather than mocks:** with only 2
+documents in the corpus, `rank_bm25`'s default `BM25Okapi` computed an IDF of exactly `0.0` for every
+term (each term appeared in precisely 1 of 2 documents, and Okapi's classic IDF formula
+`log((N-df+0.5)/(df+0.5))` is exactly zero at that ratio) - meaning **obviously relevant results
+scored zero and were silently dropped**. This is a real risk for the actual use case: SME tenants
+with only a handful of uploaded documents is a realistic cold-start state, not a test artifact.
+Switched to `BM25Plus`, which adds a delta term guaranteeing strictly positive IDF regardless of
+corpus size. Caught by `test_rag_integration.py` (live Postgres + live MinIO), not by the 14 offline
+unit tests, which used corpora too small to trigger it until the integration test's realistic
+2-document scenario.
+
+**Full suite: 91 tests** (forecasting 46, pricing 27, rag 18). Verified passing/skipping correctly
+with no live infra (68 pass, 23 skip), and with Postgres + MinIO up (all applicable tests pass).
+`flake8` clean.
+
+**New/updated items in `PENDING_ACTIONS.md`:** PDF/DOCX extraction not implemented (new); the
+pgvector ask (#1) now has a concrete efficiency argument attached, not just the semantic-search one.
 
 ## How to add an entry
 

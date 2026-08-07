@@ -14,7 +14,7 @@ there's still a record of what happened. New items get added to the bottom of th
 
 | # | Item | Owner | Blocks | Status |
 |---|---|---|---|---|
-| 1 | Add `pgvector` extension + `knowledge_chunks` table to schema | Infra/DB | Phase 3 RAG Chatbot (spec §21) | 🔴 Open |
+| 1 | Add `pgvector` extension + `knowledge_chunks` table to schema | Infra/DB | Semantic (embedding/FAISS) retrieval for Phase 3 RAG Chatbot (spec §21). Note: lexical (BM25) retrieval does **not** need this — it's built and tested (`src/ai/rag/`) against existing tables. Without `knowledge_chunks`, chunk text also isn't persisted anywhere, so the BM25 index gets rebuilt from MinIO on every retrieval call — a second, efficiency-driven reason to unblock this, not just semantic search | 🔴 Open |
 | 2 | Add Row-Level Security policies for tenant isolation | Infra/DB | Defense-in-depth on multi-tenancy (spec §10, §37) | 🔴 Open |
 | 3 | Add `currency_rates` table | Infra/DB | Cross-currency pricing logic (spec §9, §19) | 🔴 Open |
 | 4 | `reviews`/`news_record`/`social_mention`/`extracted_entity`/`sentiment_result` tables don't exist | Infra/DB | Phase 4 Market Intelligence (NER, sentiment — spec §15, §16) | 🔴 Open |
@@ -29,6 +29,7 @@ there's still a record of what happened. New items get added to the bottom of th
 | 8 | `.github/workflows/staging-deployment.yml` builds/deploys `Dockerfile.ai` and a `docker compose ... ai` service — **neither exists anywhere in the repo, on any branch** | Infra/DevOps | CI will fail the first time this workflow actually runs end-to-end (currently only triggers on push to `main`) | 🟠 Open — discovered during this session's repo audit, not caused by AI/ML work |
 | 9 | No root-level `requirements.txt`, but `Dockerfile.backend` runs `pip install -r requirements.txt` | Backend/Infra | Backend Docker build is currently broken | 🟠 Open — discovered during this session's repo audit |
 | 14 | `products` table has no `cost`/COGS column | Backend/DB | Spec §19 calls for margin-based pricing guardrails; without a cost basis, `src/ai/pricing/guardrails.py` can only bound *how much a suggested price can move*, not *whether it stays profitable* — a materially weaker guardrail | 🟡 Open — small ask (`ALTER TABLE products ADD COLUMN cost NUMERIC(10, 2);`), same shape as item #7 |
+| 15 | `src/ai/rag/data_access.py` only decodes MinIO objects as plain UTF-8 text — PDF/DOCX aren't extracted, though `MINIO_STORAGE_ARCHITECTURE.md` explicitly expects "supplier PDFs, business text files" in `ceopro-rag-knowledge` | AI/ML (self-flagged — not someone else's blocker, but noted here so it isn't silently assumed done) | Any uploaded PDF/DOCX in that bucket is currently invisible to RAG ingestion, not an error, just silently unmatched by any document row that references it | 🟡 Open — needs `pypdf`/`python-docx` added; not started |
 
 ## Security
 

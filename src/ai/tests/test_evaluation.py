@@ -31,6 +31,33 @@ def test_mase_nan_when_training_series_too_short():
     assert math.isnan(result)
 
 
+def test_pinball_loss_zero_for_perfect_quantile_prediction():
+    assert evaluation.pinball_loss([10, 20, 30], [10, 20, 30], quantile=0.5) == 0.0
+
+
+def test_pinball_loss_penalizes_under_prediction_more_at_high_quantile():
+    # 90th percentile forecast that undershoots should cost more than one that overshoots
+    under = evaluation.pinball_loss(actual=[100], predicted_quantile=[80], quantile=0.9)
+    over = evaluation.pinball_loss(actual=[100], predicted_quantile=[120], quantile=0.9)
+    assert under > over
+
+
+def test_pinball_loss_penalizes_over_prediction_more_at_low_quantile():
+    under = evaluation.pinball_loss(actual=[100], predicted_quantile=[80], quantile=0.1)
+    over = evaluation.pinball_loss(actual=[100], predicted_quantile=[120], quantile=0.1)
+    assert over > under
+
+
+def test_pinball_loss_at_median_quantile_matches_half_mae():
+    result = evaluation.pinball_loss(actual=[10, 20], predicted_quantile=[12, 18], quantile=0.5)
+    assert result == pytest.approx(evaluation.mae([10, 20], [12, 18]) / 2)
+
+
+def test_pinball_loss_rejects_invalid_quantile():
+    with pytest.raises(ValueError):
+        evaluation.pinball_loss([1], [1], quantile=1.5)
+
+
 def test_compare_to_baselines_identifies_model_as_best():
     comparison = evaluation.compare_to_baselines(
         model_predictions=[10, 10, 10],
