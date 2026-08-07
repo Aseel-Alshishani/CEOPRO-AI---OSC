@@ -92,6 +92,26 @@ tier of the stack, by design, since neither pgvector nor a chat-history table ex
   call). That's correct but doesn't scale, which is itself a concrete argument for the pgvector ask
   in `PENDING_ACTIONS.md` #1, not just a workaround for its absence.
 
+### `extraction/` — Phase 4 groundwork, rule-based NER (spec §15)
+
+Implements the regex/rule tier of information extraction — spec §15's own explicitly-sanctioned
+low-resource option ("NER may use: ... EntityRuler. Regex patterns. Fuzzy matching. Domain-specific
+rules."), not a pretrained transformer. No trained model, no GPU, the lightest possible NER tier.
+
+- `regex_patterns.py` — MONEY, CURRENCY, PERCENT, DISCOUNT, EMAIL, PHONE, INVOICE_ID, ORDER_ID, DATE.
+  Currency codes are configuration-driven (spec §9), defaulting to spec's own list (JOD, EGP, SAR,
+  AED, QAR, KWD, BHD, OMR, MAD, TND, DZD, USD, EUR, ZAR).
+- `catalog_matching.py` — PRODUCT/COMPETITOR entity types, matched against a tenant's own known
+  names rather than pattern-extracted (there's no regular pattern for a product name). Reuses
+  `pricing.matching.similarity()` directly rather than a second fuzzy-matching implementation.
+- `data_access.py` — reads known product/competitor names from the existing `products`/`competitors`
+  tables. Nothing is written — there's no `extracted_entity` table yet (`PENDING_ACTIONS.md` #4), so
+  this produces a result list with nowhere to persist to until that table exists.
+- `extractor.py` — combines both into one call.
+
+Out of scope here: ORG, PERSON, GPE, ADDRESS (spec §15's other target types) — these need world
+knowledge or a trained model to extract reliably; regex/catalog-matching can't do them justice.
+
 ### Known upstream blockers (not fixed here — flagged in [`PENDING_ACTIONS.md`](../../PENDING_ACTIONS.md))
 
 - No real transaction volume yet (`mocks/sales_transactions_mock.csv` has 3 rows) — `forecasting/`'s
@@ -109,6 +129,8 @@ tier of the stack, by design, since neither pgvector nor a chat-history table ex
 - `rag/data_access.py` decodes MinIO objects as plain UTF-8 text only — PDF/DOCX documents (which
   `MINIO_STORAGE_ARCHITECTURE.md` explicitly expects in `ceopro-rag-knowledge`) aren't extracted.
 - No chat-history table exists, so RAG conversation persistence isn't implemented.
+- No `extracted_entity` table exists, so `extraction/`'s output has nowhere to persist to yet —
+  `extractor.py` is called directly and its result used in-memory, not written anywhere.
 
 ## Running tests
 
@@ -125,11 +147,12 @@ pip install -r src/ai/requirements.txt
 pytest src/ai/tests
 ```
 
-`test_integration_db.py` (forecasting) and `test_pricing_integration_db.py` (pricing) additionally
-validate the raw SQL in each module's `data_access.py`/`evidence.py` against a real PostgreSQL
-instance running the actual `init_schema.sql` — column types, JSONB casts, FK constraints, and INT
-rounding on `demand_forecasts.expected_demand` are things a mocked connection can't catch. Both are
-skipped unless `AI_TEST_DATABASE_URL` is set, so neither ever runs in CI or blocks anyone without
+`test_integration_db.py` (forecasting), `test_pricing_integration_db.py` (pricing), and
+`test_extraction_integration_db.py` (extraction) additionally validate the raw SQL in each module's
+`data_access.py`/`evidence.py` against a real PostgreSQL instance running the actual
+`init_schema.sql` — column types, JSONB casts, FK constraints, and INT rounding on
+`demand_forecasts.expected_demand` are things a mocked connection can't catch. All are
+skipped unless `AI_TEST_DATABASE_URL` is set, so none ever run in CI or block anyone without
 Docker available. Point it at a disposable database — the tests insert and roll back rows, but don't
 aim it at a shared dev database:
 

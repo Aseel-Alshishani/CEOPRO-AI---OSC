@@ -21,7 +21,7 @@ in [`PENDING_ACTIONS.md`](PENDING_ACTIONS.md) so it stays visible without diggin
 |---|---|---|---|
 | Phase 2 — Demand Intelligence (§18, §23, §25) | `src/ai/forecasting/` | 🟢 Built, tested (unit + integration) | Baselines, XGBoost + walk-forward validation, cold-start policy, evidence writers, Redis consumer. See entries below. |
 | Phase 3 — RAG Chatbot (§21) | `src/ai/rag/` | 🟡 Retrieval built/tested; chatbot itself not started | Document ingestion + BM25 lexical retrieval built against existing `rag_documents_metadata` + MinIO — doesn't need pgvector. Still missing: semantic/FAISS retrieval, LLM reasoning step, chat history (needs a new table). See entry below. |
-| Phase 4 — Market Intelligence (§15, §16, §17) | — | ⚪ Not started | Blocked: schema has no `reviews`/`news_record`/`social_mention`/`extracted_entity`/`sentiment_result` tables yet. |
+| Phase 4 — Market Intelligence (§15, §16, §17) | `src/ai/extraction/` | 🟡 Rule-based NER built/tested; sentiment + persistence not started | Regex extraction (MONEY/CURRENCY/PERCENT/DISCOUNT/EMAIL/PHONE/INVOICE_ID/ORDER_ID/DATE) + catalog matching (PRODUCT/COMPETITOR) built. No `extracted_entity` table to write results to yet; sentiment analysis and ORG/PERSON/GPE entity types not started (need a heavier pretrained model — deferred, see `AI_PROGRESS.md`'s compute-tier discussion). See entry below. |
 | Phase 5 — Price Intelligence (§19) | `src/ai/pricing/` | 🟢 Built, tested (unit + integration) | Product matching, rule-based recommendation, price-change guardrail, evidence + recommendation_outcomes writers. See entry below. Margin guardrails are weaker than spec'd — `products` has no cost column (`PENDING_ACTIONS.md` #14). Real competitor price data still doesn't exist (`PENDING_ACTIONS.md` #5), so the cold-start/UNKNOWN path is what actually runs today, same as Phase 2. |
 | Phase 6 — Competitor Ranking (§20) | — | ⚪ Not started | Same data gap as Phase 5 (`PENDING_ACTIONS.md` #5). |
 
@@ -254,6 +254,42 @@ with no live infra (68 pass, 23 skip), and with Postgres + MinIO up (all applica
 
 **New/updated items in `PENDING_ACTIONS.md`:** PDF/DOCX extraction not implemented (new); the
 pgvector ask (#1) now has a concrete efficiency argument attached, not just the semantic-search one.
+
+## 2026-08-07 — Phase 4 rule-based NER built: `src/ai/extraction/`
+
+Third item off the "no heavy compute" prioritized list. Implements spec §15's own explicitly-named
+low-resource option — "NER may use: ... EntityRuler. Regex patterns. Fuzzy matching. Domain-specific
+rules." — not a placeholder ahead of a transformer, but the spec's sanctioned starting tier.
+
+- `regex_patterns.py` — MONEY, CURRENCY, PERCENT, DISCOUNT, EMAIL, PHONE, INVOICE_ID, ORDER_ID, DATE.
+  Currency list is configuration-driven (spec §9), defaulting to spec's own 14-currency list.
+- `catalog_matching.py` — PRODUCT/COMPETITOR entity types, matched against a tenant's own known
+  names (candidate spans from capitalized word runs, scored via `pricing.matching.similarity()` —
+  reused directly rather than reimplemented, spec §22's "one consistent approach" principle applied
+  beyond just evidence records).
+- `data_access.py` — reads known product/competitor names from existing tables. Writes nothing —
+  there's no `extracted_entity` table (`PENDING_ACTIONS.md` #4), so results have nowhere to persist.
+- `extractor.py` — combines both into one call.
+
+Out of scope: ORG, PERSON, GPE, ADDRESS (spec §15's other target types) — these need world knowledge
+or a trained model; regex/catalog-matching can't do them justice. Sentiment analysis (spec §16) also
+not started this round — both are the "medium compute" tier flagged when this prioritized list was
+first laid out, deliberately after the lighter items.
+
+**Testing caught a real bug**, this time in the very first full test run rather than needing live
+infra to surface it: `extract_order_id("Your order #A4821X has shipped")` returned nothing. The
+regex required the `-`/`#` separator to immediately follow `ORDER` with no space
+(`(?:ORD|ORDER)[-#]?\s?(...)`), but real text has the separator *after* a space (`"order #A4821X"`,
+not `"order#A4821X"`). Fixed by allowing optional whitespace before the separator too, in both the
+`INVOICE_ID` and `ORDER_ID` patterns (the latter's test happened not to exercise this, but the same
+bug was latent there).
+
+**Full suite: 119 tests** (forecasting 46, pricing 27, rag 18, extraction 28: 25 offline + 3
+live-Postgres). Verified passing/skipping correctly with no live infra (93 pass, 26 skip) and with
+Postgres up (all applicable pass). `flake8` clean.
+
+No new `PENDING_ACTIONS.md` items — the `extracted_entity` table gap was already implied by item #4,
+now made concrete: the extraction logic itself is no longer the blocker, only the persistence table.
 
 ## How to add an entry
 
