@@ -83,6 +83,27 @@ def test_load_competitor_prices_excludes_wrong_currency(conn, seeded_tenant_prod
     assert records == []
 
 
+def test_load_own_product_excludes_soft_deleted_product(conn, seeded_tenant_product_and_competitor):
+    """products.deleted_at (added after this module was first built) must be respected."""
+    tenant_id, product_id, _ = seeded_tenant_product_and_competitor
+    with conn.cursor() as cursor:
+        cursor.execute("UPDATE products SET deleted_at = NOW() WHERE product_id = %s;", (product_id,))
+    conn.commit()
+
+    assert data_access.load_own_product(conn, tenant_id, product_id) is None
+
+
+def test_load_competitor_prices_excludes_deactivated_competitor(conn, seeded_tenant_product_and_competitor):
+    """competitors.is_active (added after this module was first built) must be respected."""
+    tenant_id, product_id, competitor_id = seeded_tenant_product_and_competitor
+    with conn.cursor() as cursor:
+        cursor.execute("UPDATE competitors SET is_active = FALSE WHERE competitor_id = %s;", (competitor_id,))
+    conn.commit()
+
+    records = data_access.load_competitor_prices(conn, tenant_id, "JOD")
+    assert records == []
+
+
 def test_run_price_recommendation_end_to_end_against_real_db(conn, seeded_tenant_product_and_competitor):
     tenant_id, product_id, _ = seeded_tenant_product_and_competitor
 

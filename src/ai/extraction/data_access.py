@@ -10,11 +10,15 @@ from typing import List
 
 def load_known_product_names(conn, tenant_id: str) -> List[str]:
     with conn.cursor() as cursor:
-        cursor.execute("SELECT product_name FROM products WHERE tenant_id = %s;", (tenant_id,))
+        cursor.execute(
+            "SELECT product_name FROM products WHERE tenant_id = %s AND deleted_at IS NULL;", (tenant_id,)
+        )
         return [row[0] for row in cursor.fetchall()]
 
 
 def load_known_competitor_names(conn, tenant_id: str) -> List[str]:
     with conn.cursor() as cursor:
-        cursor.execute("SELECT competitor_name FROM competitors WHERE tenant_id = %s;", (tenant_id,))
+        cursor.execute(
+            "SELECT competitor_name FROM competitors WHERE tenant_id = %s AND is_active = TRUE;", (tenant_id,)
+        )
         return [row[0] for row in cursor.fetchall()]

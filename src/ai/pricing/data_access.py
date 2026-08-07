@@ -18,7 +18,7 @@ def load_own_product(conn, tenant_id: str, product_id: str) -> Optional[dict]:
     query = """
         SELECT product_name, current_price, currency
         FROM products
-        WHERE tenant_id = %s AND product_id = %s;
+        WHERE tenant_id = %s AND product_id = %s AND deleted_at IS NULL;
     """
     with conn.cursor() as cursor:
         cursor.execute(query, (tenant_id, product_id))
@@ -36,18 +36,23 @@ def load_competitor_prices(conn, tenant_id: str, currency: str, max_age_days: in
     currency_rates (spec S9), which doesn't exist yet (PENDING_ACTIONS.md #3).
     Only ALLOWED-source, exact-data records within the freshness window are
     returned, per the Collection Policy Engine (spec S13) and S19's
-    "Date of collection" requirement.
+    "Date of collection" requirement. Also excludes prices captured against a
+    competitor since deactivated (competitors.is_active) - a stale price from
+    a competitor the tenant has since marked inactive/removed shouldn't
+    influence a live recommendation.
     """
     max_age_days = MAX_PRICE_AGE_DAYS if max_age_days is None else max_age_days
 
     query = """
-        SELECT price_entry_id, competitor_id, product_name_captured, price_found, currency, captured_at
-        FROM competitor_prices
-        WHERE tenant_id = %s
-          AND currency = %s
-          AND is_exact_data = TRUE
-          AND source_status = 'ALLOWED'
-          AND captured_at >= NOW() - (%s || ' days')::interval;
+        SELECT cp.price_entry_id, cp.competitor_id, cp.product_name_captured, cp.price_found, cp.currency, cp.captured_at
+        FROM competitor_prices cp
+        JOIN competitors c ON c.competitor_id = cp.competitor_id
+        WHERE cp.tenant_id = %s
+          AND cp.currency = %s
+          AND cp.is_exact_data = TRUE
+          AND cp.source_status = 'ALLOWED'
+          AND c.is_active = TRUE
+          AND cp.captured_at >= NOW() - (%s || ' days')::interval;
     """
     with conn.cursor() as cursor:
         cursor.execute(query, (tenant_id, currency, str(max_age_days)))

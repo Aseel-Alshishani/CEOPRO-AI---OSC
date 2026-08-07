@@ -91,6 +91,21 @@ def test_load_product_context_reads_price_and_stock(conn, seeded_tenant_and_prod
     assert context["current_stock"] is None  # no inventory row seeded
 
 
+def test_load_product_context_excludes_soft_deleted_product(conn, seeded_tenant_and_product):
+    """
+    products.deleted_at (soft-delete, added to the schema after this module was
+    first built) must be respected - a deleted product's context shouldn't be
+    silently returned as if it were still active.
+    """
+    tenant_id, product_id = seeded_tenant_and_product
+    with conn.cursor() as cursor:
+        cursor.execute("UPDATE products SET deleted_at = NOW() WHERE product_id = %s;", (product_id,))
+    conn.commit()
+
+    context = data_access.load_product_context(conn, tenant_id, product_id)
+    assert context is None
+
+
 def test_evidence_writers_round_trip_through_real_tables(conn, seeded_tenant_and_product):
     tenant_id, product_id = seeded_tenant_and_product
 

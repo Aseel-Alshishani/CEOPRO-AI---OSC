@@ -29,6 +29,8 @@ def conn():
 @pytest.fixture
 def seeded_tenant(conn):
     tenant_id = str(uuid.uuid4())
+    product_id = str(uuid.uuid4())
+    competitor_id = str(uuid.uuid4())
     with conn.cursor() as cursor:
         cursor.execute(
             """
@@ -42,27 +44,49 @@ def seeded_tenant(conn):
             INSERT INTO products (product_id, tenant_id, product_name, current_price, currency)
             VALUES (%s, %s, 'Sunscreen SPF 50', 18.00, 'JOD');
             """,
-            (str(uuid.uuid4()), tenant_id),
+            (product_id, tenant_id),
         )
         cursor.execute(
             """
             INSERT INTO competitors (competitor_id, tenant_id, competitor_name, country_code)
             VALUES (%s, %s, 'Rival Pharmacy', 'JO');
             """,
-            (str(uuid.uuid4()), tenant_id),
+            (competitor_id, tenant_id),
         )
     conn.commit()
-    return tenant_id
+    return tenant_id, product_id, competitor_id
 
 
 def test_load_known_product_names(conn, seeded_tenant):
-    names = data_access.load_known_product_names(conn, seeded_tenant)
+    tenant_id, _, _ = seeded_tenant
+    names = data_access.load_known_product_names(conn, tenant_id)
     assert names == ["Sunscreen SPF 50"]
 
 
 def test_load_known_competitor_names(conn, seeded_tenant):
-    names = data_access.load_known_competitor_names(conn, seeded_tenant)
+    tenant_id, _, _ = seeded_tenant
+    names = data_access.load_known_competitor_names(conn, tenant_id)
     assert names == ["Rival Pharmacy"]
+
+
+def test_load_known_product_names_excludes_soft_deleted(conn, seeded_tenant):
+    """products.deleted_at (added after this module was first built) must be respected."""
+    tenant_id, product_id, _ = seeded_tenant
+    with conn.cursor() as cursor:
+        cursor.execute("UPDATE products SET deleted_at = NOW() WHERE product_id = %s;", (product_id,))
+    conn.commit()
+
+    assert data_access.load_known_product_names(conn, tenant_id) == []
+
+
+def test_load_known_competitor_names_excludes_deactivated(conn, seeded_tenant):
+    """competitors.is_active (added after this module was first built) must be respected."""
+    tenant_id, _, competitor_id = seeded_tenant
+    with conn.cursor() as cursor:
+        cursor.execute("UPDATE competitors SET is_active = FALSE WHERE competitor_id = %s;", (competitor_id,))
+    conn.commit()
+
+    assert data_access.load_known_competitor_names(conn, tenant_id) == []
 
 
 def test_load_known_names_empty_for_tenant_with_no_products(conn):
