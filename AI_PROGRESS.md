@@ -729,6 +729,42 @@ missing-table reference), and #22 (nothing applies any migration). None of this 
 `src/ai/` beyond re-running the existing suite as a regression check (134 passed, 52 skipped offline —
 consistent, no regressions from the merge itself).
 
+## 2026-08-08 — `PENDING_ACTIONS.md` corrected: a commit merged into `main` alongside PR #6 made false "resolved" claims
+
+After PR #6 merged, a follow-up check found that a commit titled "docs(compliance): close and update
+blocking action rows 1 through 4 with precise architectural resolution logs" had been pushed directly
+onto the `claude/sentiment-analysis` branch before it merged, and landed on `main` along with it.
+
+**The claims didn't hold up against re-verification.** That commit marked items #1 (pgvector image),
+#2 (RLS), and #4 (market-intelligence tables) as `✅ Resolved`, with descriptions like "successfully
+unblocking direct table and vector deployment metrics" (#1) and "permanently injected into
+`init_schema.sql`... to enforce transactional isolation" (#2). Re-checked all three against real
+infrastructure, the same way every finding in this log has been checked:
+
+- **#1**: the referenced "upgrade" changed `docker-compose.yml`'s image tag to `pgvector/pgvector:15-pgorg`
+  — the exact same invalid tag already flagged earlier. `docker pull` still fails.
+- **#2**: the RLS "fix" is a separate migration file, not anything injected into `init_schema.sql`, and
+  it doesn't add `FORCE ROW LEVEL SECURITY` — the table-owner bypass this item is actually about is
+  untouched. It also references a table, `ai_recommendations`, that doesn't exist in the schema at all.
+- **#4**: `extracted_entity`/`news_record`/`social_mention` are now *defined* in a migration file, but,
+  like #1 and #2, nothing applies that file to a running database — "successfully provisioned" overstates
+  what actually happened.
+
+**The merge that combined this commit with the earlier PR #6 branch didn't deduplicate rows properly**
+— items #1, #2, #3, #4, #5, #6, #7, #8, #9, #14, #15 all ended up appearing *twice* in the merged file:
+once with this track's own accurate, verified wording, once with the false-claim version. The false-claim
+commit also had every backtick-wrapped code span in the file corrupted — not just in the rows it claims
+to have touched, but throughout the entire document (e.g. `` `artifact_path` `` → `rtifact_path`,
+`` `ast.parse()` `` → `st.parse()`, `` `noorhassouneh-patch-1` `` → `oorhassouneh-patch-1`) — consistent
+with an automated process rather than a careful manual edit, and consistent with the pattern this
+session has already seen from several other confidently-worded but empirically-wrong commits (the
+fabricated `seed_demo_data.py`, the CI workflow rewrites that didn't fix `Dockerfile.ai`).
+
+**Fix**: restored `PENDING_ACTIONS.md` to this track's last verified-accurate version (removing every
+duplicate row and the false-claim content), re-applied on top of the current `main`. No other files
+were touched by the false-claim commit, so nothing else needed correcting. This is purely a
+documentation-accuracy fix — no code, schema, or test changes.
+
 ## How to add an entry
 
 1. New date-stamped `##` section at the bottom (never edit history).
