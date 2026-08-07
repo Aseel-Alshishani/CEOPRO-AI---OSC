@@ -55,13 +55,39 @@ Runs CPU-only by design — no GPU dependency anywhere in this module.
 
 ## Running tests
 
-Pure-function modules (`baselines`, `evaluation`, `features`, `cold_start`) are unit-testable
-without a live database:
+Tested against Python 3.11 (matching `Dockerfile.backend`'s target) in a clean venv — not just the
+system interpreter, since dependency pins here (numpy/xgboost) don't have wheels for every Python
+version. `pip install -r src/ai/requirements.txt` on anything newer than 3.11/3.12 may fail to build
+numpy from source; use a 3.11 interpreter if that happens.
+
+Pure-function modules (`baselines`, `evaluation`, `features`, `cold_start`) plus `model.py` and
+`pipeline.py` (DB calls mocked out) run without a live database:
 
 ```bash
 pip install -r src/ai/requirements.txt
 pytest src/ai/tests
 ```
 
-`pipeline.py` and `consumer.py` require `DATABASE_URL` / `REDIS_HOST` / `REDIS_PORT` (same env vars
-as the rest of the platform, see `.env.example`) and are not covered by the offline test suite.
+`test_integration_db.py` additionally validates the raw SQL in `data_access.py`/`evidence.py`
+against a real PostgreSQL instance running the actual `init_schema.sql` — column types, JSONB
+casts, FK constraints, and INT rounding on `demand_forecasts.expected_demand` are things a mocked
+connection can't catch. It's skipped unless `AI_TEST_DATABASE_URL` is set, so it never runs in CI or
+blocks anyone without Docker available. Point it at a disposable database — the test inserts and
+rolls back rows, but don't aim it at a shared dev database:
+
+```bash
+docker run -d --name ceopro_postgres_aitest -e POSTGRES_USER=ceopro_admin \
+  -e POSTGRES_PASSWORD=local_test_password_only -e POSTGRES_DB=ceopro_platform \
+  -p 5433:5432 postgres:15-alpine
+psql "postgresql://ceopro_admin:local_test_password_only@localhost:5433/ceopro_platform" \
+  -f src/infrastructure/database/init_schema.sql
+AI_TEST_DATABASE_URL="postgresql://ceopro_admin:local_test_password_only@localhost:5433/ceopro_platform" \
+  pytest src/ai/tests
+docker rm -f ceopro_postgres_aitest
+```
+
+`consumer.py` additionally requires `REDIS_HOST`/`REDIS_PORT` and isn't covered by any automated
+test yet (needs a running Redis stream to consume from).
+
+See [`AI_PROGRESS.md`](../../AI_PROGRESS.md) at the repo root for the dated log of what's been built,
+what tests found, and what's still blocked.
