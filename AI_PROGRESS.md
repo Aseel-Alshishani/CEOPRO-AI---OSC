@@ -22,7 +22,7 @@ in [`PENDING_ACTIONS.md`](PENDING_ACTIONS.md) so it stays visible without diggin
 | Phase 2 — Demand Intelligence (§18, §23, §25) | `src/ai/forecasting/` | 🟢 Built, tested (unit + integration) | Baselines, XGBoost + walk-forward validation, cold-start policy, evidence writers, Redis consumer. See entries below. |
 | Phase 3 — RAG Chatbot (§21) | `src/ai/rag/` | 🟡 Hybrid (lexical + semantic) retrieval built/tested; chatbot itself not started | Document ingestion + BM25 + FAISS semantic retrieval + Reciprocal Rank Fusion, all against existing `rag_documents_metadata` + MinIO — none of it needs pgvector. Still missing: LLM reasoning step, chat history (needs a new table). A real fusion edge case found and documented (not fixed — inherent BM25 behavior on very short chunks). See entries below. |
 | Phase 4 — Market Intelligence (§15, §16, §17) | `src/ai/extraction/`, `src/ai/sentiment/` | 🟡 Rule-based NER + sentiment analysis built/tested; NER persistence + MPI (§17) not started | Regex extraction (MONEY/CURRENCY/PERCENT/DISCOUNT/EMAIL/PHONE/INVOICE_ID/ORDER_ID/DATE) + catalog matching (PRODUCT/COMPETITOR) built. No `extracted_entity` table to write results to yet; ORG/PERSON/GPE entity types not started. Sentiment analysis (`sentiment/`) built: XLM-RoBERTa-based classifier (`cardiffnlp/twitter-xlm-roberta-base-sentiment`), per-subject aggregation, LOW SAMPLE SIZE policy — `reviews` table is currently empty in prod, so the `UNKNOWN`-evidence path is what runs today. Market Perception Index (§17, combines sentiment + source reliability + recency + volume + entity relevance) not started. See entries below. |
-| Phase 5 — Price Intelligence (§9, §19) | `src/ai/pricing/` | 🟢 Built, tested (unit + integration) | Product matching, rule-based recommendation, price-change guardrail, evidence + recommendation_outcomes writers, plus traceable currency conversion (`currency.py`) surfacing cross-currency competitor prices as reference-only context (see [PR #5](https://github.com/Huda-Hassouneh/CEOPRO-AI/pull/5), not yet merged as of this entry). See entries below. Margin guardrails are weaker than spec'd — `products` has no cost column (`PENDING_ACTIONS.md` #14). Real competitor price data still doesn't exist (`PENDING_ACTIONS.md` #5), so the cold-start/UNKNOWN path is what actually runs today, same as Phase 2. |
+| Phase 5 — Price Intelligence (§9, §19) | `src/ai/pricing/` | 🟢 Built, tested (unit + integration) | Product matching, rule-based recommendation, price-change guardrail, evidence + recommendation_outcomes writers, plus traceable currency conversion (`currency.py`) surfacing cross-currency competitor prices as reference-only context ([PR #5](https://github.com/Huda-Hassouneh/CEOPRO-AI/pull/5), merged 2026-08-07). See entries below. Margin guardrails are weaker than spec'd — `products` has no cost column (`PENDING_ACTIONS.md` #14). Real competitor price data still doesn't exist (`PENDING_ACTIONS.md` #5), so the cold-start/UNKNOWN path is what actually runs today, same as Phase 2. |
 | Phase 6 — Competitor Ranking (§20) | — | ⚪ Not started | Same data gap as Phase 5 (`PENDING_ACTIONS.md` #5). |
 
 Legend: 🟢 built and tested · 🟡 in progress · 🟠 blocked on another team · ⚪ not started.
@@ -641,6 +641,43 @@ by reading the model card).
 No event contract exists yet for triggering sentiment analysis on new reviews (checked
 `src/infrastructure/init_broker.py` — no `ceopro:stream:*` topic provisioned for it), so — same
 situation as `pricing/` — this is called directly rather than via a Redis consumer for now.
+
+## 2026-08-07 — Post-merge integrity check: real Redis topic-name break found and fixed in `forecasting/consumer.py`
+
+After PR #5 (cross-currency pricing) merged, pulled `main` to rebase PR #6 (sentiment analysis) and
+ran a full sanity/integrity sweep over what else had landed on `main` in the meantime (five new infra
+commits: CI workflow changes, a telemetry/Loki/Promtail stack, an `.env.example` update, and a new
+`src/infrastructure/database/seed_demo_data.py`).
+
+**Real, currently-broken bug found in our own code — fixed, not just flagged.** One of those commits
+rewrote `src/infrastructure/init_broker.py` to provision `ceopro:stream:demand_forecast_requested`
+(previously `ceopro:stream:forecast_requested`) — matching `DATA_OWNERSHIP_AND_CONTRACTS.md`'s Event B
+name exactly, which the old topic name didn't. `src/ai/forecasting/consumer.py` still hardcoded the
+old name, so it would silently listen on a stream nothing publishes to anymore, and the demand-forecast
+Redis pipeline would deliver zero events with no error anywhere. This is `src/ai/`'s own file, not
+infra's, so fixed directly (not just logged in `PENDING_ACTIONS.md`) — `stream_key` now matches the
+name `init_broker.py` actually provisions. Verified end-to-end against a real disposable Redis: ran the
+actual `init_broker.py` topic-creation logic, then constructed `ForecastRequestConsumer` and confirmed
+its consumer group registers on the same stream the broker init step creates (previously this would
+have silently diverged) — `xinfo_groups()` on the broker-provisioned stream shows the consumer's group.
+`test_consumer.py`'s 10 tests all reference `consumer.stream_key` rather than a hardcoded string, so no
+test logic needed to change, just a docstring comment.
+
+**Also re-confirmed (not new, not caused by AI/ML work, logged in `PENDING_ACTIONS.md` #8):**
+`staging-deployment.yml` was touched by two of the five new commits (CI restructuring), but still
+imports `src.ai.main`/`src.backend.main` and builds `Dockerfile.ai` — none of which exist anywhere in
+the repo on any branch. The underlying problem is unchanged despite the surrounding YAML being
+rewritten twice.
+
+**Not touched (infra-owned, out of scope):** the new `seed_demo_data.py`, the Loki/Promtail/Grafana
+stack, and `.env.example` — briefly reviewed for anything affecting `src/ai/` specifically (schema
+column names our `data_access.py` files depend on, env vars our modules read) and found nothing that
+changes anything here.
+
+**Full suite after the merge + fix: 186 tests, all passing** (170 run with `AI_TEST_DATABASE_URL` +
+`AI_TEST_REDIS_HOST` set against real disposable Postgres/Redis containers running the real schema and
+the real (fixed) consumer; 16 skipped — real-model/embedding/MinIO-gated tests not re-verified this
+round since nothing here touches those paths). `flake8` clean.
 
 ## How to add an entry
 
