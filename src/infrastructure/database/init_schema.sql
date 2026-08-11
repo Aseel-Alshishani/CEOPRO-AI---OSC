@@ -1,12 +1,8 @@
 
--- 1. SYSTEM EXTENSIONS & CORE FOUNDATION
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS vector;
 
-
-
 -- TABLE 1: COMPANIES (Core Workspace Management)
-
 CREATE TABLE companies (
     tenant_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     business_name VARCHAR(255) NOT NULL,
@@ -21,62 +17,50 @@ CREATE TABLE companies (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
-
-
 -- TABLE 2: USERS (Global Centralized Authentication Directory)
-
 CREATE TABLE users (
     user_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     email VARCHAR(255) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
+    password_hash TEXT NOT NULL,
     full_name VARCHAR(150),
     preferred_language VARCHAR(5) DEFAULT 'en',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    -- Compliance Constraint: Enforces global standard email patterns at db-level
-    CONSTRAINT chk_email_format CHECK (email ~* '^[A-Za-z0-9._%-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,4}$')
+    CONSTRAINT chk_email_format CHECK (email ~* '^[A-Za-z0-9._%-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$')
 );
 
-
-
 -- TABLE 3: TENANT_USERS (Pivot Table for RBAC Authorization Loops)
-
 CREATE TABLE tenant_users (
     tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
     user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-    role VARCHAR(50) NOT NULL DEFAULT 'staff', -- Validated roles: owner, admin, manager, accountant, staff
+    role VARCHAR(50) NOT NULL DEFAULT 'staff',
     joined_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (tenant_id, user_id)
+    PRIMARY KEY (tenant_id, user_id),
+    CONSTRAINT chk_valid_roles CHECK (role IN ('owner', 'admin', 'manager', 'accountant', 'staff'))
 );
 
-
-
 -- TABLE 4: PRODUCTS (Dynamic Multilingual Catalog Layer)
-
 CREATE TABLE products (
     product_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
-    product_name JSONB NOT NULL, -- Format: {"en": "iPhone 15", "ar": "آيفون ١٥"}
+    product_name JSONB NOT NULL,
     brand JSONB,
     category JSONB,
-    description JSONB, -- Context rich text used to extract semantic AI embeddings
+    description JSONB,
     current_price NUMERIC(10, 2) NOT NULL CHECK (current_price >= 0),
     currency VARCHAR(3) NOT NULL,
     source VARCHAR(20) NOT NULL DEFAULT 'MANUAL',
-    metadata JSONB DEFAULT '{}'::jsonb, -- Flexible schema-less properties for developer agility
+    metadata JSONB DEFAULT '{}'::jsonb,
     created_by_user_id UUID,
     updated_by_user_id UUID,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    deleted_at TIMESTAMP WITH TIME ZONE, -- Soft delete management for GDPR asset tracking
+    deleted_at TIMESTAMP WITH TIME ZONE,
     CONSTRAINT chk_product_source CHECK (source IN ('MANUAL', 'IMPORTED')),
     CONSTRAINT fk_products_creator FOREIGN KEY (tenant_id, created_by_user_id) REFERENCES tenant_users(tenant_id, user_id),
     CONSTRAINT fk_products_updater FOREIGN KEY (tenant_id, updated_by_user_id) REFERENCES tenant_users(tenant_id, user_id)
 );
 
-
-
 -- TABLE 5: PRODUCT_PRICE_HISTORY (Internal Financial Price Fluctuations)
-
 CREATE TABLE product_price_history (
     price_history_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     product_id UUID NOT NULL REFERENCES products(product_id) ON DELETE CASCADE,
@@ -89,9 +73,7 @@ CREATE TABLE product_price_history (
     CONSTRAINT fk_price_history_user FOREIGN KEY (tenant_id, changed_by_user_id) REFERENCES tenant_users(tenant_id, user_id)
 );
 
-
 -- TABLE 6: INVENTORY (Warehouse Allocations & Safety Reorder Thresholds)
-
 CREATE TABLE inventory (
     inventory_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
@@ -104,76 +86,74 @@ CREATE TABLE inventory (
     CONSTRAINT fk_inventory_user FOREIGN KEY (tenant_id, updated_by_user_id) REFERENCES tenant_users(tenant_id, user_id)
 );
 
+-- ROW LEVEL SECURITY ISOLATION POLICIES FOR PART 1
+ALTER TABLE companies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenant_users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE products ENABLE ROW LEVEL SECURITY;
+ALTER TABLE product_price_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inventory ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY tenant_isolation_companies ON companies FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+CREATE POLICY tenant_isolation_tenant_users ON tenant_users FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+CREATE POLICY tenant_isolation_products ON products FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+CREATE POLICY tenant_isolation_price_history ON product_price_history FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+CREATE POLICY tenant_isolation_inventory ON inventory FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
 
 
 
 -- TABLE 7: CURRENCY_RATES (Global Multilateral Exchange Rate Directory)
-
 CREATE TABLE currency_rates (
     rate_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     base_currency VARCHAR(3) NOT NULL,
     target_currency VARCHAR(3) NOT NULL,
     rate NUMERIC(18, 8) NOT NULL CHECK (rate > 0),
-    rate_date TIMESTAMP WITH TIME ZONE NOT NULL, -- Safeguards volatile conversion periods
+    rate_date TIMESTAMP WITH TIME ZONE NOT NULL,
     source VARCHAR(100),
     fetched_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_currency_rate_time UNIQUE (base_currency, target_currency, rate_date)
 );
 
-
-
 -- TABLE 8: INVOICES (Sales Master Document Headers)
-
 CREATE TABLE invoices (
     invoice_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
-    invoice_number VARCHAR(100) NOT NULL, -- Unique incremental identifier within each tenant scope
-    payment_method VARCHAR(50) NOT NULL,  -- Standard options: CASH, CREDIT_CARD, APPLE_PAY
+    invoice_number VARCHAR(100) NOT NULL,
+    payment_method VARCHAR(50) NOT NULL,
     sub_total NUMERIC(12, 2) NOT NULL CHECK (sub_total >= 0),
     tax_amount NUMERIC(12, 2) NOT NULL CHECK (tax_amount >= 0),
     discount_amount NUMERIC(12, 2) DEFAULT 0.00 CHECK (discount_amount >= 0),
     grand_total NUMERIC(12, 2) NOT NULL CHECK (grand_total >= 0),
     currency VARCHAR(3) NOT NULL,
-    sale_source VARCHAR(50) DEFAULT 'POS', -- Point of Sale vs E-Commerce channels
+    sale_source VARCHAR(50) DEFAULT 'POS',
     issued_by_user_id UUID,
     issued_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_invoice_per_tenant UNIQUE (tenant_id, invoice_number),
-    CONSTRAINT fk_invoices_user FOREIGN KEY (tenant_id, issued_by_user_id) REFERENCES tenant_users(tenant_id, user_id)
+    CONSTRAINT fk_invoices_user FOREIGN KEY (tenant_id, issued_by_user_id) REFERENCES tenant_users(tenant_id, user_id),
+    CONSTRAINT chk_payment_method CHECK (payment_method IN ('CASH', 'CREDIT_CARD', 'APPLE_PAY'))
 );
 
-
-
-
 -- TABLE 9: INVOICE_ITEMS (Granular Sales Document Line Details)
-
 CREATE TABLE invoice_items (
     item_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     invoice_id UUID NOT NULL REFERENCES invoices(invoice_id) ON DELETE CASCADE,
     product_id UUID NOT NULL REFERENCES products(product_id),
     quantity INT NOT NULL CHECK (quantity > 0),
-    unit_price NUMERIC(10, 2) NOT NULL CHECK (unit_price >= 0), -- Captured price lock at point of purchase
+    unit_price NUMERIC(10, 2) NOT NULL CHECK (unit_price >= 0),
     total_price NUMERIC(10, 2) NOT NULL CHECK (total_price >= 0),
     CONSTRAINT chk_item_total CHECK (total_price = (quantity * unit_price))
 );
 
-
-
 -- TABLE 10: GLOBAL_COMPETITORS (Canonical Marketplace Directory Registry)
-
 CREATE TABLE global_competitors (
     competitor_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    competitor_name VARCHAR(255) UNIQUE NOT NULL, -- Clean master record prevents duplicate spellings
+    competitor_name VARCHAR(255) UNIQUE NOT NULL,
     country_code VARCHAR(2),
-    website_url VARCHAR(255),
+    website_url TEXT,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
-
-
-
 -- TABLE 11: TENANT_COMPETITORS (Workspace Specific Target Focus Configurations)
-
 CREATE TABLE tenant_competitors (
     tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
     competitor_id UUID NOT NULL REFERENCES global_competitors(competitor_id) ON DELETE CASCADE,
@@ -187,16 +167,13 @@ CREATE TABLE tenant_competitors (
     CONSTRAINT chk_competitor_source CHECK (source IN ('MANUAL', 'SYSTEM_DISCOVERED'))
 );
 
-
-
 -- TABLE 12: COMPETITOR_PRODUCT_MAPPINGS (High Efficiency URL Resource Indexes)
-
 CREATE TABLE competitor_product_mappings (
     mapping_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL,
     product_id UUID NOT NULL REFERENCES products(product_id) ON DELETE CASCADE,
     competitor_id UUID NOT NULL,
-    competitor_product_url TEXT NOT NULL, -- Static path targeting directly for iterative scrapes
+    competitor_product_url TEXT NOT NULL,
     product_name_captured VARCHAR(255) NOT NULL,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     last_scraped_at TIMESTAMP WITH TIME ZONE,
@@ -205,11 +182,19 @@ CREATE TABLE competitor_product_mappings (
     CONSTRAINT uq_tenant_product_competitor UNIQUE (tenant_id, product_id, competitor_id)
 );
 
+-- ROW LEVEL SECURITY ISOLATION POLICIES FOR PART 2
+ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;
+ALTER TABLE invoice_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenant_competitors ENABLE ROW LEVEL SECURITY;
+ALTER TABLE competitor_product_mappings ENABLE ROW LEVEL SECURITY;
 
+CREATE POLICY tenant_isolation_invoices ON invoices FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+CREATE POLICY tenant_isolation_invoice_items ON invoice_items FOR ALL USING (invoice_id IN (SELECT invoice_id FROM invoices WHERE tenant_id = current_setting('app.current_tenant_id', true)::uuid));
+CREATE POLICY tenant_isolation_tenant_competitors ON tenant_competitors FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+CREATE POLICY tenant_isolation_competitor_product_mappings ON competitor_product_mappings FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
 
 
 -- TABLE 13: COMPETITOR_PRICES (High Performance Numerical Delta Tracker)
-
 CREATE TABLE competitor_prices (
     price_entry_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL,
@@ -223,10 +208,7 @@ CREATE TABLE competitor_prices (
     CONSTRAINT chk_price_collection_method CHECK (collection_method IN ('MANUAL', 'PUBLIC_API', 'PUBLIC_FEED', 'WEB_SCRAPER'))
 );
 
-
-
 -- TABLE 14: REVIEWS (Multi-Source Index Supporting Dense Semantic Vectors)
-
 CREATE TABLE reviews (
     review_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
@@ -240,8 +222,8 @@ CREATE TABLE reviews (
     review_date TIMESTAMP WITH TIME ZONE,
     collection_method VARCHAR(50) NOT NULL DEFAULT 'MANUAL',
     source_status VARCHAR(20) NOT NULL DEFAULT 'ALLOWED',
-    review_vector vector(1536), -- Accommodates open-source or commercial embedding models
-    embedding_model_version VARCHAR(50) DEFAULT 'text-embedding-3-small', -- Mitigates model drift mismatch risks
+    review_vector vector(1536),
+    embedding_model_version VARCHAR(50) DEFAULT 'text-embedding-3-small',
     collected_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_review_subject_type CHECK (subject_type IN ('PRODUCT', 'COMPETITOR', 'BUSINESS')),
     CONSTRAINT chk_review_collection_method CHECK (collection_method IN ('MANUAL', 'PUBLIC_API', 'PUBLIC_FEED')),
@@ -249,10 +231,7 @@ CREATE TABLE reviews (
     CONSTRAINT fk_reviews_tenant_comp FOREIGN KEY (tenant_id, competitor_id) REFERENCES tenant_competitors(tenant_id, competitor_id) ON DELETE CASCADE
 );
 
-
-
 -- TABLE 15: SENTIMENT_RESULTS (Model Classification Probabilities Matrix)
-
 CREATE TABLE sentiment_results (
     sentiment_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     review_id UUID NOT NULL REFERENCES reviews(review_id) ON DELETE CASCADE,
@@ -268,10 +247,7 @@ CREATE TABLE sentiment_results (
     CONSTRAINT uq_sentiment_per_review UNIQUE (tenant_id, review_id)
 );
 
-
-
 -- TABLE 16: DEMAND_FORECASTS (XGBoost Future Demand Expectations Logs)
-
 CREATE TABLE demand_forecasts (
     forecast_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
@@ -287,11 +263,7 @@ CREATE TABLE demand_forecasts (
     CONSTRAINT chk_confidence_range CHECK (confidence_range_upper >= confidence_range_lower)
 );
 
-
-
-
 -- TABLE 17: EVIDENCE_RECORDS (Unified AI Reasoning & Business Assertions Log)
-
 CREATE TABLE evidence_records (
     evidence_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
@@ -306,10 +278,7 @@ CREATE TABLE evidence_records (
     CONSTRAINT chk_evidence_category CHECK (category IN ('FACT', 'PREDICTION', 'RECOMMENDATION', 'ASSUMPTION', 'UNKNOWN'))
 );
 
-
-
 -- TABLE 18: RECOMMENDATION_OUTCOMES (Closed-Loop Model Evaluation Tracer)
-
 CREATE TABLE recommendation_outcomes (
     outcome_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     evidence_id UUID NOT NULL REFERENCES evidence_records(evidence_id) ON DELETE CASCADE,
@@ -322,11 +291,24 @@ CREATE TABLE recommendation_outcomes (
     CONSTRAINT chk_action_taken CHECK (action_taken IN ('accepted', 'modified', 'rejected', 'ignored'))
 );
 
+-- LAYER 3 SECURITY: ROW LEVEL SECURITY ISOLATION POLICIES FOR TABLES 13-18
+ALTER TABLE competitor_prices ENABLE ROW LEVEL SECURITY;
+ALTER TABLE reviews ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sentiment_results ENABLE ROW LEVEL SECURITY;
+ALTER TABLE demand_forecasts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE evidence_records ENABLE ROW LEVEL SECURITY;
+ALTER TABLE recommendation_outcomes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY tenant_isolation_competitor_prices ON competitor_prices FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+CREATE POLICY tenant_isolation_reviews ON reviews FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+CREATE POLICY tenant_isolation_sentiment_results ON sentiment_results FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+CREATE POLICY tenant_isolation_demand_forecasts ON demand_forecasts FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+CREATE POLICY tenant_isolation_evidence_records ON evidence_records FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+CREATE POLICY tenant_isolation_recommendation_outcomes ON recommendation_outcomes FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
 
 
 
 -- TABLE 19: RAG_DOCUMENTS_METADATA (Physical File Pointer Manifests)
-
 CREATE TABLE rag_documents_metadata (
     document_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
@@ -336,23 +318,18 @@ CREATE TABLE rag_documents_metadata (
     uploaded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
-
-
 -- TABLE 20: RAG_DOCUMENT_CHUNKS (Contextual Text Splitting & Embedding Depot)
-
 CREATE TABLE rag_document_chunks (
     chunk_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     document_id UUID NOT NULL REFERENCES rag_documents_metadata(document_id) ON DELETE CASCADE,
     tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
     chunk_index INT NOT NULL,
     chunk_text TEXT NOT NULL,
-    embedding VECTOR(1024), -- Built to host highly accurate multi-lingual dense models
+    embedding VECTOR(1024),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
-
 -- TABLE 21: DATA_SOURCES (Collection Compliance Policy Boundaries Engine)
-
 CREATE TABLE data_sources (
     data_source_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id UUID REFERENCES companies(tenant_id) ON DELETE CASCADE,
@@ -365,10 +342,7 @@ CREATE TABLE data_sources (
     CONSTRAINT chk_data_source_status CHECK (status IN ('ALLOWED', 'RESTRICTED', 'BLOCKED'))
 );
 
-
-
 -- TABLE 22: INGESTION_JOBS (Pipeline Synchronization Execution Runs)
-
 CREATE TABLE ingestion_jobs (
     job_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
@@ -381,10 +355,7 @@ CREATE TABLE ingestion_jobs (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
-
-
 -- TABLE 23: IMPORT_STAGING_ROWS (Intermediate Data Validation Sandbox)
-
 CREATE TABLE import_staging_rows (
     staging_row_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     job_id UUID NOT NULL REFERENCES ingestion_jobs(job_id) ON DELETE CASCADE,
@@ -402,3 +373,15 @@ CREATE TABLE import_staging_rows (
     CONSTRAINT chk_staging_validation_status CHECK (validation_status IN ('valid', 'needs_review', 'rejected'))
 );
 
+-- LAYER 4 SECURITY: ROW LEVEL SECURITY ISOLATION POLICIES FOR TABLES 19-23
+ALTER TABLE rag_documents_metadata ENABLE ROW LEVEL SECURITY;
+ALTER TABLE rag_document_chunks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE data_sources ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ingestion_jobs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE import_staging_rows ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY tenant_isolation_rag_documents_metadata ON rag_documents_metadata FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+CREATE POLICY tenant_isolation_rag_document_chunks ON rag_document_chunks FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+CREATE POLICY tenant_isolation_data_sources ON data_sources FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid OR tenant_id IS NULL);
+CREATE POLICY tenant_isolation_ingestion_jobs ON ingestion_jobs FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+CREATE POLICY tenant_isolation_import_staging_rows ON import_staging_rows FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
