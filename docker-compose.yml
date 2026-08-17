@@ -135,6 +135,23 @@ services:
       timeout: 5s
       retries: 5
 
+  migrate:
+    image: python:3.11-slim
+    container_name: ceopro_migrate
+    working_dir: /app
+    volumes:
+      - ./:/app
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    command: sh -c "pip install --no-cache-dir psycopg2-binary && python scripts/apply_migrations.py"
+    networks:
+      - ceopro_core_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   redis_data:
