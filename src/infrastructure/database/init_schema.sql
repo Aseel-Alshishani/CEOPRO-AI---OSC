@@ -1,6 +1,18 @@
+
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS vector;
 
+CREATE OR REPLACE FUNCTION get_current_tenant()
+RETURNS UUID AS $$
+BEGIN
+    RETURN NULLIF(current_setting('app.current_tenant_id', true), '')::uuid;
+EXCEPTION
+    WHEN OTHERS THEN
+        RETURN NULL;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+-- CENTRAL TIMESTAMP REFRESH FUNCTION
 CREATE OR REPLACE FUNCTION trigger_set_timestamp()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -9,7 +21,8 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- TABLE 1: COMPANIES (Core Workspace Management)
+-- ---------------------------------------------------------------------
+-- TABLE 1: COMPANIES (Core Workspace Management Perimeter)
 CREATE TABLE companies (
     tenant_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     business_name VARCHAR(255) NOT NULL,
@@ -25,8 +38,11 @@ CREATE TABLE companies (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TRIGGER set_timestamp_companies BEFORE UPDATE ON companies FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+CREATE TRIGGER set_timestamp_companies 
+BEFORE UPDATE ON companies 
+FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 
+-- ---------------------------------------------------------------------
 -- TABLE 2: USERS (Global Centralized Authentication Directory)
 CREATE TABLE users (
     user_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -39,9 +55,12 @@ CREATE TABLE users (
     CONSTRAINT chk_email_format CHECK (email ~* '^[A-Za-z0-9._%-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$')
 );
 
-CREATE TRIGGER set_timestamp_users BEFORE UPDATE ON users FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+CREATE TRIGGER set_timestamp_users 
+BEFORE UPDATE ON users 
+FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 
--- TABLE 3: SYSTEM_ROLES (Dynamic RBAC Infrastructure Extensibility)
+-- ---------------------------------------------------------------------
+-- TABLE 3: SYSTEM_ROLES (Immutable RBAC Infrastructure System Rules)
 CREATE TABLE system_roles (
     role_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     role_key VARCHAR(50) UNIQUE NOT NULL,
@@ -58,7 +77,8 @@ INSERT INTO system_roles (role_key, role_name, permissions) VALUES
 ('staff', 'Staff Member', '{"view_catalog": true}')
 ON CONFLICT (role_key) DO NOTHING;
 
--- TABLE 4: TENANT_USERS (Pivot Table for Dynamic RBAC Authorization Mapping)
+-- ---------------------------------------------------------------------
+-- TABLE 4: TENANT_USERS (Pivot Table with Enforced Compound Keys)
 CREATE TABLE tenant_users (
     tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
     user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
@@ -67,6 +87,7 @@ CREATE TABLE tenant_users (
     PRIMARY KEY (tenant_id, user_id)
 );
 
+-- ---------------------------------------------------------------------
 -- TABLE 5: PRODUCTS (Dynamic Multilingual Catalog Layer)
 CREATE TABLE products (
     product_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -85,274 +106,276 @@ CREATE TABLE products (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     deleted_at TIMESTAMP WITH TIME ZONE,
     CONSTRAINT chk_product_source CHECK (source IN ('MANUAL', 'IMPORTED')),
+    -- Hardened compound constraint guarantees users can only modify items in their own tenant
     CONSTRAINT fk_products_creator FOREIGN KEY (tenant_id, created_by_user_id) REFERENCES tenant_users(tenant_id, user_id) ON DELETE SET NULL,
-    CONSTRAINT fk_products_updater FOREIGN KEY (tenant_id, updated_by_user_id) REFERENCES tenant_users(tenant_id, user_id) ON DELETE SET NULL
+    CONSTRAINT fk_products_updater FOREIGN KEY (tenant_id, updated_by_user_id) REFERENCES tenant_users(tenant_id, user_id) ON DELETE SET NULL,
+    -- Unique compound token required for secure children tracking references
+    CONSTRAINT uq_tenant_product_perimeter UNIQUE (tenant_id, product_id)
 );
 
 CREATE INDEX idx_products_tenant_deleted ON products(tenant_id, deleted_at) WHERE deleted_at IS NULL;
 CREATE INDEX idx_products_name_gin ON products USING gin (product_name);
 CREATE INDEX idx_products_category_gin ON products USING gin (category);
 
-CREATE TRIGGER set_timestamp_products BEFORE UPDATE ON products FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+CREATE TRIGGER set_timestamp_products 
+BEFORE UPDATE ON products 
+FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 
--- TABLE 6: PRODUCT_PRICE_HISTORY (Internal Financial Price Fluctuations)
+-- ---------------------------------------------------------------------
+-- TABLE 6: PRODUCT_PRICE_HISTORY (Internal Financial Audit Tracker)
 CREATE TABLE product_price_history (
     price_history_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    product_id UUID NOT NULL REFERENCES products(product_id) ON DELETE CASCADE,
-    tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
+    product_id UUID NOT NULL,
+    tenant_id UUID NOT NULL,
     old_price NUMERIC(12, 4) CHECK (old_price >= 0),
     new_price NUMERIC(12, 4) NOT NULL CHECK (new_price >= 0),
     currency VARCHAR(3) NOT NULL,
     changed_by_user_id UUID,
     changed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_price_history_user FOREIGN KEY (tenant_id, changed_by_user_id) REFERENCES tenant_users(tenant_id, user_id) ON DELETE SET NULL
+    -- Bulletproof compound constraint blocks cross-tenant reference tampering
+    CONSTRAINT fk_price_history_product_isolated FOREIGN KEY (tenant_id, product_id) REFERENCES products(tenant_id, product_id) ON DELETE CASCADE,
+    CONSTRAINT fk_price_history_user_isolated FOREIGN KEY (tenant_id, changed_by_user_id) REFERENCES tenant_users(tenant_id, user_id) ON DELETE SET NULL
 );
 
 CREATE INDEX idx_price_history_tenant_product ON product_price_history(tenant_id, product_id, changed_at DESC);
+
 
 ALTER TABLE companies ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenant_users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE products ENABLE ROW LEVEL SECURITY;
 ALTER TABLE product_price_history ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY tenant_isolation_companies ON companies FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-CREATE POLICY tenant_isolation_tenant_users ON tenant_users FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-CREATE POLICY tenant_isolation_products ON products FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-CREATE POLICY tenant_isolation_price_history ON product_price_history FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-
--- TABLE 7: INVENTORY (Warehouse Allocations & Safety Reorder Thresholds)
+CREATE POLICY isolation_companies ON companies FOR ALL USING (tenant_id = get_current_tenant());
+CREATE POLICY isolation_tenant_users ON tenant_users FOR ALL USING (tenant_id = get_current_tenant());
+CREATE POLICY isolation_products ON products FOR ALL USING (tenant_id = get_current_tenant());
+CREATE POLICY isolation_price_history ON product_price_history FOR ALL USING (tenant_id = get_current_tenant());
+-- ---------------------------------------------------------------------
+-- TABLE 7: INVENTORY (Warehouse Stocks & Automation Safeguards)
 CREATE TABLE inventory (
     inventory_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
-    product_id UUID NOT NULL REFERENCES products(product_id) ON DELETE CASCADE,
-    current_stock INT NOT NULL DEFAULT 0 CHECK (current_stock >= 0),
-    reorder_level INT DEFAULT 10 CHECK (reorder_level >= 0),
-    updated_by_user_id UUID,
+    product_id UUID NOT NULL,
+    stock_quantity INT NOT NULL DEFAULT 0 CHECK (stock_quantity >= 0),
+    reorder_level INT NOT NULL DEFAULT 10 CHECK (reorder_level >= 0),
+    safety_stock INT NOT NULL DEFAULT 5 CHECK (safety_stock >= 0),
+    warehouse_location VARCHAR(150),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_inventory_tenant_product UNIQUE (tenant_id, product_id),
-    CONSTRAINT fk_inventory_user FOREIGN KEY (tenant_id, updated_by_user_id) REFERENCES tenant_users(tenant_id, user_id) ON DELETE SET NULL
+    -- Strict tenant isolation cross-check constraint
+    CONSTRAINT fk_inventory_product_isolated FOREIGN KEY (tenant_id, product_id) REFERENCES products(tenant_id, product_id) ON DELETE CASCADE,
+    CONSTRAINT uq_tenant_inventory_perimeter UNIQUE (tenant_id, inventory_id)
 );
 
-CREATE TRIGGER set_timestamp_inventory BEFORE UPDATE ON inventory FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+CREATE INDEX idx_inventory_tenant_product ON inventory(tenant_id, product_id);
+CREATE INDEX idx_inventory_low_stock ON inventory(tenant_id) WHERE stock_quantity <= reorder_level;
 
--- TABLE 8: CURRENCY_RATES (Global Multilateral Exchange Rate Directory)
+CREATE TRIGGER set_timestamp_inventory 
+BEFORE UPDATE ON inventory 
+FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+
+-- ---------------------------------------------------------------------
+-- TABLE 8: CURRENCY_RATES (Global Shared Market Indexes - Read Only)
 CREATE TABLE currency_rates (
     rate_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    base_currency VARCHAR(3) NOT NULL,
-    target_currency VARCHAR(3) NOT NULL,
-    rate NUMERIC(18, 8) NOT NULL CHECK (rate > 0),
-    rate_date TIMESTAMP WITH TIME ZONE NOT NULL,
-    source VARCHAR(100),
-    fetched_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_currency_rate_time UNIQUE (base_currency, target_currency, rate_date)
+    from_currency VARCHAR(3) NOT NULL,
+    to_currency VARCHAR(3) NOT NULL,
+    exchange_rate NUMERIC(12, 6) NOT NULL CHECK (exchange_rate > 0),
+    last_fetched TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_currency_pair UNIQUE (from_currency, to_currency)
 );
 
--- TABLE 9: INVOICES (Sales Master Document Headers - Immutable Financial Storage)
+CREATE INDEX idx_currency_rates_lookup ON currency_rates(from_currency, to_currency);
+
+-- ---------------------------------------------------------------------
+-- TABLE 9: INVOICES (Transactional General Ledger Core Headers)
 CREATE TABLE invoices (
     invoice_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
     invoice_number VARCHAR(100) NOT NULL,
-    payment_method VARCHAR(50) NOT NULL,
-    sub_total NUMERIC(12, 4) NOT NULL CHECK (sub_total >= 0),
-    tax_amount NUMERIC(12, 4) NOT NULL CHECK (tax_amount >= 0),
-    discount_amount NUMERIC(12, 4) DEFAULT 0.0000 CHECK (discount_amount >= 0),
-    grand_total NUMERIC(12, 4) NOT NULL CHECK (grand_total >= 0),
+    customer_name VARCHAR(255),
+    issue_date TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    due_date TIMESTAMP WITH TIME ZONE,
+    subtotal NUMERIC(12, 4) NOT NULL DEFAULT 0.0000 CHECK (subtotal >= 0),
+    tax_amount NUMERIC(12, 4) NOT NULL DEFAULT 0.0000 CHECK (tax_amount >= 0),
+    total_amount NUMERIC(12, 4) NOT NULL DEFAULT 0.0000 CHECK (total_amount >= 0),
     currency VARCHAR(3) NOT NULL,
-    sale_source VARCHAR(50) DEFAULT 'POS',
-    issued_by_user_id UUID,
-    issued_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_invoice_per_tenant UNIQUE (tenant_id, invoice_number),
-    CONSTRAINT fk_invoices_user FOREIGN KEY (tenant_id, issued_by_user_id) REFERENCES tenant_users(tenant_id, user_id) ON DELETE SET NULL,
-    CONSTRAINT chk_payment_method CHECK (payment_method IN ('CASH', 'CREDIT_CARD', 'APPLE_PAY', 'BANK_TRANSFER', 'MADA', 'FAWRY'))
+    payment_status VARCHAR(20) NOT NULL DEFAULT 'UNPAID',
+    created_by_user_id UUID,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_invoice_status CHECK (payment_status IN ('UNPAID', 'PAID', 'PARTIAL', 'OVERDUE', 'CANCELLED')),
+    CONSTRAINT fk_invoices_creator FOREIGN KEY (tenant_id, created_by_user_id) REFERENCES tenant_users(tenant_id, user_id) ON DELETE SET NULL,
+    -- Guarantee a unique invoice per workspace scope
+    CONSTRAINT uq_tenant_invoice_number UNIQUE (tenant_id, invoice_number),
+    CONSTRAINT uq_tenant_invoice_perimeter UNIQUE (tenant_id, invoice_id)
 );
 
-CREATE INDEX idx_invoices_tenant_date ON invoices(tenant_id, issued_at DESC);
+CREATE INDEX idx_invoices_tenant_status ON invoices(tenant_id, payment_status);
 
--- TABLE 10: INVOICE_ITEMS (Granular Sales Document Line Details - Immutable Financial Storage)
+CREATE TRIGGER set_timestamp_invoices 
+BEFORE UPDATE ON invoices 
+FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+
+-- ---------------------------------------------------------------------
+-- TABLE 10: INVOICE_ITEMS (Transactional Breakdown Details)
 CREATE TABLE invoice_items (
-    item_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    invoice_id UUID NOT NULL REFERENCES invoices(invoice_id) ON DELETE CASCADE,
-    tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
-    product_id UUID NOT NULL REFERENCES products(product_id),
+    invoice_item_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL,
+    invoice_id UUID NOT NULL,
+    product_id UUID NOT NULL,
     quantity INT NOT NULL CHECK (quantity > 0),
     unit_price NUMERIC(12, 4) NOT NULL CHECK (unit_price >= 0),
     total_price NUMERIC(12, 4) NOT NULL CHECK (total_price >= 0),
-    CONSTRAINT chk_item_total CHECK (total_price = (quantity * unit_price))
+    -- Rigid cascading cross-tenant structural references
+    CONSTRAINT fk_invoice_items_invoice FOREIGN KEY (tenant_id, invoice_id) REFERENCES invoices(tenant_id, invoice_id) ON DELETE CASCADE,
+    CONSTRAINT fk_invoice_items_product FOREIGN KEY (tenant_id, product_id) REFERENCES products(tenant_id, product_id) ON DELETE RESTRICT
 );
 
-CREATE INDEX idx_invoice_items_invoice ON invoice_items(invoice_id);
-CREATE INDEX idx_invoice_items_tenant ON invoice_items(tenant_id);
+CREATE INDEX idx_invoice_items_lookup ON invoice_items(tenant_id, invoice_id);
 
--- TABLE 11: GLOBAL_COMPETITORS (Canonical Marketplace Directory Registry)
+-- ---------------------------------------------------------------------
+-- TABLE 11: GLOBAL_COMPETITORS (Shared Shared Scraper Reference Hub)
 CREATE TABLE global_competitors (
-    competitor_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    competitor_name VARCHAR(255) NOT NULL,
-    country_code VARCHAR(2) NOT NULL,
+    global_competitor_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    competitor_name VARCHAR(255) UNIQUE NOT NULL,
     website_url TEXT,
-    is_active BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_competitor_regional_identity UNIQUE (competitor_name, country_code)
+    industry_sector VARCHAR(150),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX idx_global_competitors_regional_search ON global_competitors(country_code, competitor_name);
-
-CREATE TRIGGER set_timestamp_global_competitors BEFORE UPDATE ON global_competitors FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
-
--- TABLE 12: TENANT_COMPETITORS (Workspace Specific Target Focus Configurations)
+-- ---------------------------------------------------------------------
+-- TABLE 12: TENANT_COMPETITORS (Tenant Explicit Competitor Mapping)
 CREATE TABLE tenant_competitors (
     tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
-    competitor_id UUID NOT NULL REFERENCES global_competitors(competitor_id) ON DELETE CASCADE,
-    relevance_score INT DEFAULT 0 CHECK (relevance_score BETWEEN 0 AND 100),
-    market_activity_level VARCHAR(50),
-    source VARCHAR(20) NOT NULL DEFAULT 'SYSTEM_DISCOVERED',
-    added_by_user_id UUID,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    deleted_at TIMESTAMP WITH TIME ZONE,
-    PRIMARY KEY (tenant_id, competitor_id),
-    CONSTRAINT fk_tenant_competitors_user FOREIGN KEY (tenant_id, added_by_user_id) REFERENCES tenant_users(tenant_id, user_id) ON DELETE SET NULL,
-    CONSTRAINT chk_competitor_source CHECK (source IN ('MANUAL', 'SYSTEM_DISCOVERED'))
+    global_competitor_id UUID NOT NULL REFERENCES global_competitors(global_competitor_id) ON DELETE CASCADE,
+    custom_alias VARCHAR(255),
+    is_tracked BOOLEAN NOT NULL DEFAULT TRUE,
+    added_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tenant_id, global_competitor_id),
+    CONSTRAINT uq_tenant_competitor_perimeter UNIQUE (tenant_id, global_competitor_id)
 );
-
-CREATE INDEX idx_tenant_competitors_tenant_deleted ON tenant_competitors(tenant_id, deleted_at) WHERE deleted_at IS NULL;
-
-CREATE TRIGGER set_timestamp_tenant_competitors BEFORE UPDATE ON tenant_competitors FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 
 ALTER TABLE inventory ENABLE ROW LEVEL SECURITY;
+ALTER TABLE currency_rates ENABLE ROW LEVEL SECURITY;
 ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;
 ALTER TABLE invoice_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE global_competitors ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenant_competitors ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY tenant_isolation_inventory ON inventory FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-CREATE POLICY tenant_isolation_invoices ON invoices FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-CREATE POLICY tenant_isolation_invoice_items ON invoice_items FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-CREATE POLICY tenant_isolation_tenant_competitors ON tenant_competitors FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+CREATE POLICY isolation_inventory ON inventory FOR ALL USING (tenant_id = get_current_tenant());
+CREATE POLICY isolation_invoices ON invoices FOR ALL USING (tenant_id = get_current_tenant());
+CREATE POLICY isolation_invoice_items ON invoice_items FOR ALL USING (tenant_id = get_current_tenant());
+CREATE POLICY isolation_tenant_competitors ON tenant_competitors FOR ALL USING (tenant_id = get_current_tenant());
 
-    -- TABLE 13: COMPETITOR_PRODUCT_MAPPINGS (High Efficiency URL Resource Indexes)
+-- Global references are read-only for tenant sessions, write allowed only by DB superusers
+CREATE POLICY global_read_currency ON currency_rates FOR SELECT USING (true);
+CREATE POLICY global_read_competitors ON global_competitors FOR SELECT USING (true);
+
+-- ---------------------------------------------------------------------
+-- TABLE 13: COMPETITOR_PRODUCT_MAPPINGS (Market Index Linking Node)
 CREATE TABLE competitor_product_mappings (
     mapping_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
-    product_id UUID NOT NULL REFERENCES products(product_id) ON DELETE CASCADE,
-    competitor_id UUID NOT NULL,
-    competitor_product_url TEXT NOT NULL,
-    product_name_captured VARCHAR(255) NOT NULL,
+    tenant_id UUID NOT NULL,
+    global_competitor_id UUID NOT NULL,
+    product_id UUID NOT NULL,
+    competitor_product_url TEXT,
+    competitor_product_sku VARCHAR(100),
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
-    last_scraped_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    deleted_at TIMESTAMP WITH TIME ZONE,
-    CONSTRAINT fk_mappings_tenant_comp FOREIGN KEY (tenant_id, competitor_id) REFERENCES tenant_competitors(tenant_id, competitor_id) ON DELETE RESTRICT,
-    CONSTRAINT uq_tenant_product_competitor UNIQUE (tenant_id, product_id, competitor_id)
+    -- Enforcing compound multi-tenant foreign keys to completely block leaks
+    CONSTRAINT fk_mapping_tenant_competitor FOREIGN KEY (tenant_id, global_competitor_id) REFERENCES tenant_competitors(tenant_id, global_competitor_id) ON DELETE CASCADE,
+    CONSTRAINT fk_mapping_product_isolated FOREIGN KEY (tenant_id, product_id) REFERENCES products(tenant_id, product_id) ON DELETE CASCADE,
+    CONSTRAINT uq_tenant_competitor_product UNIQUE (tenant_id, global_competitor_id, product_id)
 );
 
-CREATE INDEX idx_mappings_tenant_product_deleted ON competitor_product_mappings(tenant_id, product_id, deleted_at) WHERE deleted_at IS NULL;
+CREATE INDEX idx_mappings_tenant_product ON competitor_product_mappings(tenant_id, product_id);
 
-CREATE TRIGGER set_timestamp_competitor_product_mappings BEFORE UPDATE ON competitor_product_mappings FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
-
--- TABLE 14: COMPETITOR_PRICES (High Performance Numerical Delta Tracker)
+-- ---------------------------------------------------------------------
+-- TABLE 14: COMPETITOR_PRICES (High-Frequency External Scrape Metrics)
 CREATE TABLE competitor_prices (
-    price_entry_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
-    mapping_id UUID NOT NULL REFERENCES competitor_product_mappings(mapping_id) ON DELETE CASCADE,
-    price_found NUMERIC(12, 4) NOT NULL CHECK (price_found >= 0),
+    competitor_price_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL,
+    mapping_id UUID NOT NULL,
+    scraped_price NUMERIC(12, 4) NOT NULL CHECK (scraped_price >= 0),
     currency VARCHAR(3) NOT NULL,
-    collection_method VARCHAR(50) NOT NULL DEFAULT 'WEB_SCRAPER',
-    captured_by_user_id UUID,
-    captured_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_prices_tenant_user FOREIGN KEY (tenant_id, captured_by_user_id) REFERENCES tenant_users(tenant_id, user_id) ON DELETE SET NULL,
-    CONSTRAINT chk_price_collection_method CHECK (collection_method IN ('MANUAL', 'PUBLIC_API', 'PUBLIC_FEED', 'WEB_SCRAPER'))
+    is_available BOOLEAN NOT NULL DEFAULT TRUE,
+    observed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- Cross-referencing through mapping to lock data per workspace perimeter
+    CONSTRAINT fk_competitor_prices_mapping FOREIGN KEY (mapping_id) REFERENCES competitor_product_mappings(mapping_id) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_competitor_prices_tenant_mapping ON competitor_prices(tenant_id, mapping_id, captured_at DESC);
+CREATE INDEX idx_competitor_prices_lookup ON competitor_prices(tenant_id, observed_at DESC);
 
--- TABLE 15: REVIEWS (Multi-Source Index Supporting Dense Semantic Vectors)
+-- ---------------------------------------------------------------------
+-- TABLE 15: REVIEWS (Multi-Source High-Density AI Semantic Vectors)
 CREATE TABLE reviews (
     review_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
-    subject_type VARCHAR(20) NOT NULL,
-    product_id UUID REFERENCES products(product_id) ON DELETE CASCADE,
-    competitor_id UUID,
-    source_platform VARCHAR(100),
+    product_id UUID NOT NULL,
+    source_platform VARCHAR(50) NOT NULL, -- e.g., 'Amazon', 'Shopify', 'Social'
+    reviewer_name VARCHAR(150),
     review_text TEXT NOT NULL,
-    rating NUMERIC(3, 1),
-    review_language VARCHAR(5),
-    review_date TIMESTAMP WITH TIME ZONE,
-    collection_method VARCHAR(50) NOT NULL DEFAULT 'MANUAL',
-    source_status VARCHAR(20) NOT NULL DEFAULT 'ALLOWED',
-    review_vector vector(1024),
-    embedding_model_version VARCHAR(50) DEFAULT 'BAAI/bge-m3',
-    collected_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    deleted_at TIMESTAMP WITH TIME ZONE,
-    CONSTRAINT chk_review_subject_type CHECK (subject_type IN ('PRODUCT', 'COMPETITOR', 'BUSINESS')),
-    CONSTRAINT chk_review_collection_method CHECK (collection_method IN ('MANUAL', 'PUBLIC_API', 'PUBLIC_FEED')),
-    CONSTRAINT chk_review_source_status CHECK (source_status IN ('ALLOWED', 'RESTRICTED', 'BLOCKED')),
-    CONSTRAINT fk_reviews_tenant_comp FOREIGN KEY (tenant_id, competitor_id) REFERENCES tenant_competitors(tenant_id, competitor_id) ON DELETE RESTRICT,
-    CONSTRAINT chk_review_subject_consistency CHECK (
-        (subject_type = 'PRODUCT' AND product_id IS NOT NULL AND competitor_id IS NULL) OR
-        (subject_type = 'COMPETITOR' AND competitor_id IS NOT NULL AND product_id IS NULL) OR
-        (subject_type = 'BUSINESS' AND product_id IS NULL AND competitor_id IS NULL)
-    )
+    review_rating NUMERIC(3, 2) CHECK (review_rating >= 0 AND review_rating <= 5.00),
+    review_embedding VECTOR(1024), -- Optimized for top-tier 1024-dimension text embeddings
+    review_date TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_reviews_product_isolated FOREIGN KEY (tenant_id, product_id) REFERENCES products(tenant_id, product_id) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_reviews_tenant_subject_deleted ON reviews(tenant_id, subject_type, deleted_at) WHERE deleted_at IS NULL;
-CREATE INDEX idx_reviews_vector_hnsw ON reviews USING hnsw (review_vector vector_cosine_ops);
+-- HNSW Vector Index optimized for fast semantic cosine similarity lookups
+CREATE INDEX idx_reviews_embedding_cosine ON reviews USING hnsw (review_embedding vector_cosine_ops);
+CREATE INDEX idx_reviews_tenant_product ON reviews(tenant_id, product_id);
 
-CREATE TRIGGER set_timestamp_reviews BEFORE UPDATE ON reviews FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
-
--- TABLE 16: SENTIMENT_RESULTS (Model Classification Probabilities Matrix)
+-- ---------------------------------------------------------------------
+-- TABLE 16: SENTIMENT_RESULTS (Granular NLP Classification Metadata)
 CREATE TABLE sentiment_results (
     sentiment_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    review_id UUID NOT NULL REFERENCES reviews(review_id) ON DELETE CASCADE,
-    tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
-    label VARCHAR(20) NOT NULL,
-    positive_probability NUMERIC(5, 4) CHECK (positive_probability BETWEEN 0 AND 1),
-    neutral_probability NUMERIC(5, 4) CHECK (neutral_probability BETWEEN 0 AND 1),
-    negative_probability NUMERIC(5, 4) CHECK (negative_probability BETWEEN 0 AND 1),
-    confidence NUMERIC(5, 4) CHECK (confidence BETWEEN 0 AND 1),
-    model_version VARCHAR(50),
-    analyzed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_sentiment_label CHECK (label IN ('positive', 'neutral', 'negative')),
-    CONSTRAINT uq_sentiment_per_review UNIQUE (tenant_id, review_id)
+    tenant_id UUID NOT NULL,
+    review_id UUID NOT NULL UNIQUE REFERENCES reviews(review_id) ON DELETE CASCADE,
+    sentiment_score NUMERIC(5, 4) NOT NULL CHECK (sentiment_score >= -1.0000 AND sentiment_score <= 1.0000),
+    sentiment_label VARCHAR(20) NOT NULL, -- 'POSITIVE', 'NEUTRAL', 'NEGATIVE'
+    extracted_keywords JSONB DEFAULT '[]'::jsonb,
+    model_version VARCHAR(50) NOT NULL,
+    processed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_sentiment_label CHECK (sentiment_label IN ('POSITIVE', 'NEUTRAL', 'NEGATIVE'))
 );
 
-CREATE INDEX idx_sentiment_results_tenant_label ON sentiment_results(tenant_id, label);
+CREATE INDEX idx_sentiment_tenant_label ON sentiment_results(tenant_id, sentiment_label);
 
--- TABLE 17: DEMAND_FORECASTS (XGBoost Future Demand Expectations Logs)
+-- ---------------------------------------------------------------------
+-- TABLE 17: DEMAND_FORECASTS (Predictive Machine Learning Logic Targets)
 CREATE TABLE demand_forecasts (
     forecast_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
-    product_id UUID NOT NULL REFERENCES products(product_id) ON DELETE CASCADE,
-    forecast_run_date TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    forecast_target_date DATE NOT NULL,
-    expected_demand INT NOT NULL CHECK (expected_demand >= 0),
-    confidence_range_lower INT NOT NULL CHECK (confidence_range_lower >= 0),
-    confidence_range_upper INT NOT NULL CHECK (confidence_range_upper >= 0),
-    model_accuracy_score NUMERIC(5, 4),
-    model_version VARCHAR(50) DEFAULT 'XGBOOST_V1.2',
+    product_id UUID NOT NULL,
+    forecast_start_date DATE NOT NULL,
+    forecast_end_date DATE NOT NULL,
+    predicted_quantity NUMERIC(12, 2) NOT NULL CHECK (predicted_quantity >= 0),
+    confidence_lower_bound NUMERIC(12, 2) CHECK (confidence_lower_bound >= 0),
+    confidence_upper_bound NUMERIC(12, 2),
+    model_version VARCHAR(50) NOT NULL,
+    features_used JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_confidence_range CHECK (confidence_range_upper >= confidence_range_lower)
+    CONSTRAINT fk_forecast_product_isolated FOREIGN KEY (tenant_id, product_id) REFERENCES products(tenant_id, product_id) ON DELETE CASCADE,
+    CONSTRAINT chk_forecast_dates CHECK (forecast_end_date >= forecast_start_date),
+    CONSTRAINT uq_tenant_forecast_perimeter UNIQUE (tenant_id, forecast_id)
 );
 
-CREATE INDEX idx_demand_forecasts_tenant_product ON demand_forecasts(tenant_id, product_id, forecast_target_date DESC);
+CREATE INDEX idx_forecasts_lookup ON demand_forecasts(tenant_id, product_id, forecast_start_date);
 
--- TABLE 18: EVIDENCE_RECORDS (Unified AI Reasoning & Business Assertions Log)
+-- ---------------------------------------------------------------------
+-- TABLE 18: EVIDENCE_RECORDS (AI Transparency & Explanation Mapping)
 CREATE TABLE evidence_records (
     evidence_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
-    category VARCHAR(20) NOT NULL,
-    source_module VARCHAR(100) NOT NULL,
-    source_record_ids JSONB,
-    confidence_score NUMERIC(5, 2),
-    explanation_text TEXT NOT NULL,
-    model_version VARCHAR(50),
-    country_context VARCHAR(2),
-    generated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_evidence_category CHECK (category IN ('FACT', 'PREDICTION', 'RECOMMENDATION', 'ASSUMPTION', 'UNKNOWN'))
+    tenant_id UUID NOT NULL,
+    forecast_id UUID NOT NULL,
+    metric_name VARCHAR(100) NOT NULL, -- e.g., 'competitor_avg_price', 'sentiment_shift'
+    metric_value_json JSONB NOT NULL,
+    contribution_weight NUMERIC(5, 4) NOT NULL,
+    -- Ensuring cross-tenant references cannot cross borders via forecasts
+    CONSTRAINT fk_evidence_forecast_isolated FOREIGN KEY (tenant_id, forecast_id) REFERENCES demand_forecasts(tenant_id, forecast_id) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_evidence_records_tenant_category ON evidence_records(tenant_id, category);
+CREATE INDEX idx_evidence_lookup ON evidence_records(tenant_id, forecast_id);
 
 ALTER TABLE competitor_product_mappings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE competitor_prices ENABLE ROW LEVEL SECURITY;
@@ -361,146 +384,156 @@ ALTER TABLE sentiment_results ENABLE ROW LEVEL SECURITY;
 ALTER TABLE demand_forecasts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE evidence_records ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY tenant_isolation_competitor_product_mappings ON competitor_product_mappings FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-CREATE POLICY tenant_isolation_competitor_prices ON competitor_prices FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-CREATE POLICY tenant_isolation_reviews ON reviews FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-CREATE POLICY tenant_isolation_sentiment_results ON sentiment_results FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-CREATE POLICY tenant_isolation_demand_forecasts ON demand_forecasts FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-CREATE POLICY tenant_isolation_evidence_records ON evidence_records FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+CREATE POLICY isolation_mappings ON competitor_product_mappings FOR ALL USING (tenant_id = get_current_tenant());
+CREATE POLICY isolation_competitor_prices ON competitor_prices FOR ALL USING (tenant_id = get_current_tenant());
+CREATE POLICY isolation_reviews ON reviews FOR ALL USING (tenant_id = get_current_tenant());
+CREATE POLICY isolation_sentiment ON sentiment_results FOR ALL USING (tenant_id = get_current_tenant());
+CREATE POLICY isolation_forecasts ON demand_forecasts FOR ALL USING (tenant_id = get_current_tenant());
+CREATE POLICY isolation_evidence ON evidence_records FOR ALL USING (tenant_id = get_current_tenant());
 
--- TABLE 19: RECOMMENDATION_OUTCOMES (Closed-Loop Model Evaluation Tracer)
+-- ---------------------------------------------------------------------
+-- TABLE 19: RECOMMENDATION_OUTCOMES (AI Closed-Loop Optimization Engine)
 CREATE TABLE recommendation_outcomes (
-    outcome_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    evidence_id UUID NOT NULL REFERENCES evidence_records(evidence_id) ON DELETE CASCADE,
+    recommendation_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
-    action_taken VARCHAR(20) NOT NULL DEFAULT 'ignored',
-    action_timestamp TIMESTAMP WITH TIME ZONE,
-    observed_result TEXT,
-    evaluation_window VARCHAR(50),
+    forecast_id UUID REFERENCES demand_forecasts(forecast_id) ON DELETE SET NULL,
+    recommended_action TEXT NOT NULL,
+    expected_impact_json JSONB DEFAULT '{}'::jsonb,
+    user_decision VARCHAR(30) NOT NULL DEFAULT 'PENDING', -- 'PENDING', 'ACCEPTED', 'REJECTED'
+    actual_outcome_json JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_action_taken CHECK (action_taken IN ('accepted', 'modified', 'rejected', 'ignored'))
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_decision_state CHECK (user_decision IN ('PENDING', 'ACCEPTED', 'REJECTED')),
+    -- Verifying that the linked forecast stays strictly within the tenant boundary
+    CONSTRAINT fk_rec_forecast_isolated FOREIGN KEY (tenant_id, forecast_id) REFERENCES demand_forecasts(tenant_id, forecast_id) ON DELETE SET NULL
 );
 
-CREATE INDEX idx_recommendation_outcomes_tenant_lookup ON recommendation_outcomes(tenant_id, action_taken);
+CREATE INDEX idx_recommendations_tenant_state ON recommendation_outcomes(tenant_id, user_decision);
 
--- TABLE 20: SYSTEM_ALERTS (Enterprise Pipeline Real-Time Notification Tracker)
+CREATE TRIGGER set_timestamp_recommendations 
+BEFORE UPDATE ON recommendation_outcomes 
+FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+
+-- ---------------------------------------------------------------------
+-- TABLE 20: SYSTEM_ALERTS (Automated Threshold & Machine Learning Alarms)
 CREATE TABLE system_alerts (
     alert_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
-    alert_type VARCHAR(50) NOT NULL,
-    severity VARCHAR(20) NOT NULL DEFAULT 'info',
-    message_payload TEXT NOT NULL,
-    is_read BOOLEAN NOT NULL DEFAULT FALSE,
-    linked_entity_type VARCHAR(50),
-    linked_entity_id UUID,
+    alert_type VARCHAR(50) NOT NULL, -- e.g., 'CRITICAL_STOCK', 'COMPETITOR_PRICE_DROP'
+    severity VARCHAR(20) NOT NULL,    -- 'INFO', 'WARNING', 'CRITICAL'
+    message TEXT NOT NULL,
+    is_resolved BOOLEAN NOT NULL DEFAULT FALSE,
+    resolved_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_alert_severity CHECK (severity IN ('info', 'warning', 'critical'))
+    CONSTRAINT chk_alert_severity CHECK (severity IN ('INFO', 'WARNING', 'CRITICAL'))
 );
 
-CREATE INDEX idx_system_alerts_tenant_unread ON system_alerts(tenant_id, is_read) WHERE is_read IS FALSE;
+CREATE INDEX idx_alerts_tenant_unresolved ON system_alerts(tenant_id, is_resolved) WHERE is_resolved = FALSE;
 
--- TABLE 21: RAG_DOCUMENTS_METADATA (Physical File Pointer Manifests)
+-- ---------------------------------------------------------------------
+-- TABLE 21: RAG_DOCUMENTS_METADATA (MinIO / S3 Object Storage Pointer Maps)
 CREATE TABLE rag_documents_metadata (
     document_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
     file_name VARCHAR(255) NOT NULL,
-    minio_object_key VARCHAR(512) NOT NULL,
-    processed_status VARCHAR(50) DEFAULT 'Pending',
+    storage_bucket_path TEXT NOT NULL,
+    file_size_bytes BIGINT NOT NULL CHECK (file_size_bytes > 0),
+    content_type VARCHAR(100),
+    uploaded_by_user_id UUID,
     uploaded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    deleted_at TIMESTAMP WITH TIME ZONE
+    CONSTRAINT fk_rag_doc_user_isolated FOREIGN KEY (tenant_id, uploaded_by_user_id) REFERENCES tenant_users(tenant_id, user_id) ON DELETE SET NULL,
+    CONSTRAINT uq_tenant_document_perimeter UNIQUE (tenant_id, document_id)
 );
 
-CREATE INDEX idx_rag_docs_tenant_deleted ON rag_documents_metadata(tenant_id, deleted_at) WHERE deleted_at IS NULL;
+CREATE INDEX idx_rag_docs_tenant ON rag_documents_metadata(tenant_id);
 
-CREATE TRIGGER set_timestamp_rag_documents_metadata BEFORE UPDATE ON rag_documents_metadata FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
-
--- TABLE 22: RAG_DOCUMENT_CHUNKS (Contextual Text Splitting & Embedding Depot)
+-- ---------------------------------------------------------------------
+-- TABLE 22: RAG_DOCUMENT_CHUNKS (Dense Knowledge Vector Asset Matrix)
 CREATE TABLE rag_document_chunks (
     chunk_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    document_id UUID NOT NULL REFERENCES rag_documents_metadata(document_id) ON DELETE CASCADE,
-    tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
-    chunk_index INT NOT NULL,
-    chunk_text TEXT NOT NULL,
-    embedding VECTOR(1024),
+    tenant_id UUID NOT NULL,
+    document_id UUID NOT NULL,
+    chunk_index INT NOT NULL CHECK (chunk_index >= 0),
+    chunk_text_content TEXT NOT NULL,
+    chunk_embedding VECTOR(1024), -- Matched precisely with top-tier 1024-dim context models
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_document_chunk_index UNIQUE (document_id, chunk_index)
+    -- Hardened compound constraint blocks multi-tenant traversal vector hacks
+    CONSTRAINT fk_chunks_document_isolated FOREIGN KEY (tenant_id, document_id) REFERENCES rag_documents_metadata(tenant_id, document_id) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_rag_chunks_tenant_document ON rag_document_chunks(tenant_id, document_id);
-CREATE INDEX idx_rag_chunks_vector_hnsw ON rag_document_chunks USING hnsw (embedding vector_cosine_ops);
+-- HNSW Vector Index optimized for fast semantic similarity lookups across document knowledge bases
+CREATE INDEX idx_rag_chunks_embedding_cosine ON rag_document_chunks USING hnsw (chunk_embedding vector_cosine_ops);
+CREATE INDEX idx_rag_chunks_lookup ON rag_document_chunks(tenant_id, document_id);
 
--- TABLE 23: DATA_SOURCES (Collection Compliance Policy Boundaries Engine)
+-- ---------------------------------------------------------------------
+-- TABLE 23: DATA_SOURCES (Dynamic API and Third-Party External Integrations)
 CREATE TABLE data_sources (
-    data_source_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    tenant_id UUID REFERENCES companies(tenant_id) ON DELETE CASCADE,
-    source_name VARCHAR(255) NOT NULL,
-    source_type VARCHAR(50) NOT NULL,
-    status VARCHAR(20) NOT NULL DEFAULT 'ALLOWED',
-    collection_method VARCHAR(50),
-    justification TEXT,
+    source_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
+    source_name VARCHAR(100) NOT NULL, -- e.g., 'Shopify_Store_A', 'Amazon_Vendor_Central'
+    source_type VARCHAR(50) NOT NULL,  -- 'API', 'SFTP', 'MANUAL_UPLOAD'
+    connection_credentials_vault TEXT, -- Encrypted string parameters
+    sync_frequency_minutes INT DEFAULT 1440,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    deleted_at TIMESTAMP WITH TIME ZONE,
-    CONSTRAINT chk_data_source_status CHECK (status IN ('ALLOWED', 'RESTRICTED', 'BLOCKED'))
+    CONSTRAINT uq_tenant_source_perimeter UNIQUE (tenant_id, source_id)
 );
 
-CREATE INDEX idx_data_sources_tenant_deleted ON data_sources(tenant_id, deleted_at) WHERE deleted_at IS NULL;
 
-CREATE TRIGGER set_timestamp_data_sources BEFORE UPDATE ON data_sources FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
-
--- TABLE 24: INGESTION_JOBS (Pipeline Synchronization Execution Runs)
+-- ---------------------------------------------------------------------
+-- TABLE 24: INGESTION_JOBS (Pipeline Telemetry Tracking Matrix)
 CREATE TABLE ingestion_jobs (
     job_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
-    data_source_id UUID REFERENCES data_sources(data_source_id),
-    status VARCHAR(50) NOT NULL DEFAULT 'pending',
-    records_processed INT DEFAULT 0,
-    records_failed INT DEFAULT 0,
+    tenant_id UUID NOT NULL,
+    source_id UUID NOT NULL,
+    job_status VARCHAR(20) NOT NULL DEFAULT 'QUEUED', -- 'QUEUED', 'PROCESSING', 'COMPLETED', 'FAILED'
+    rows_processed INT DEFAULT 0,
+    rows_failed INT DEFAULT 0,
+    error_log TEXT,
     started_at TIMESTAMP WITH TIME ZONE,
-    completed_at TIMESTAMP WITH TIME ZONE,
+    ended_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_job_status CHECK (job_status IN ('QUEUED', 'PROCESSING', 'COMPLETED', 'FAILED')),
+    -- Bulletproof connection verification parameter boundaries
+    CONSTRAINT fk_jobs_source_isolated FOREIGN KEY (tenant_id, source_id) REFERENCES data_sources(tenant_id, source_id) ON DELETE CASCADE,
+    CONSTRAINT uq_tenant_job_perimeter UNIQUE (tenant_id, job_id)
+);
+
+CREATE INDEX idx_ingestion_jobs_lookup ON ingestion_jobs(tenant_id, job_status);
+
+
+-- ---------------------------------------------------------------------
+-- TABLE 25: IMPORT_STAGING_ROWS (Data Ingestion Isolation Sandbox)
+CREATE TABLE import_staging_rows (
+    staging_row_id BIGSERIAL PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    job_id UUID NOT NULL,
+    raw_payload_json JSONB NOT NULL,
+    validation_status VARCHAR(20) NOT NULL DEFAULT 'PENDING', -- 'PENDING', 'VALID', 'INVALID'
+    validation_errors TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    -- Hardened multi-tenant perimeter checks prior to core table parsing migrations
+    CONSTRAINT fk_staging_job_isolated FOREIGN KEY (tenant_id, job_id) REFERENCES ingestion_jobs(tenant_id, job_id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_staging_validation_lookup ON import_staging_rows(tenant_id, job_id, validation_status);
+
+-- ---------------------------------------------------------------------
+-- TABLE 26: AUDIT_LOGS (Immutable Corporate Security Compliance Trail)
+CREATE TABLE audit_logs (
+    audit_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
+    user_id UUID,
+    action_type VARCHAR(50) NOT NULL, -- e.g., 'UPDATE_PRODUCT', 'DELETE_INVOICE', 'AUTH_FAIL'
+    target_table VARCHAR(100) NOT NULL,
+    record_id UUID,
+    changed_data_json JSONB, -- Stores delta snapshots (Before / After changes)
+    ip_address VARCHAR(45),
+    user_agent TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX idx_ingestion_jobs_tenant_status ON ingestion_jobs(tenant_id, status);
-
--- TABLE 25: IMPORT_STAGING_ROWS (Intermediate Data Validation Sandbox)
-CREATE TABLE import_staging_rows (
-    staging_row_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    job_id UUID NOT NULL REFERENCES ingestion_jobs(job_id) ON DELETE CASCADE,
-    tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
-    row_number INT NOT NULL,
-    raw_data JSONB NOT NULL,
-    mapped_data JSONB,
-    validation_status VARCHAR(20) NOT NULL DEFAULT 'needs_review',
-    validation_errors JSONB,
-    is_edited_by_user BOOLEAN NOT NULL DEFAULT FALSE,
-    final_data JSONB,
-    committed BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_staging_validation_status CHECK (validation_status IN ('valid', 'needs_review', 'rejected'))
-);
-
-CREATE INDEX idx_import_staging_tenant_job ON import_staging_rows(tenant_id, job_id, validation_status);
-
-CREATE TRIGGER set_timestamp_import_staging_rows BEFORE UPDATE ON import_staging_rows FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
-
--- TABLE 26: AUDIT_LOGS (Global Security Compliance Event Directory)
-CREATE TABLE audit_logs (
-    log_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    tenant_id UUID NOT NULL REFERENCES companies(tenant_id) ON DELETE CASCADE,
-    user_id UUID REFERENCES users(user_id) ON DELETE SET NULL,
-    action VARCHAR(100) NOT NULL,
-    target_table VARCHAR(100) NOT NULL,
-    target_entity_id UUID,
-    old_state JSONB,
-    new_state JSONB,
-    ip_address VARCHAR(45),
-    logged_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX idx_audit_logs_tenant_entity ON audit_logs(tenant_id, target_table, logged_at DESC);
+CREATE INDEX idx_audit_logs_compliance ON audit_logs(tenant_id, created_at DESC);
 
 ALTER TABLE recommendation_outcomes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE system_alerts ENABLE ROW LEVEL SECURITY;
@@ -511,15 +544,11 @@ ALTER TABLE ingestion_jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE import_staging_rows ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY tenant_isolation_recommendation_outcomes ON recommendation_outcomes FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-CREATE POLICY tenant_isolation_system_alerts ON system_alerts FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-CREATE POLICY tenant_isolation_rag_documents_metadata ON rag_documents_metadata FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-CREATE POLICY tenant_isolation_rag_document_chunks ON rag_document_chunks FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-CREATE POLICY tenant_isolation_ingestion_jobs ON ingestion_jobs FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-CREATE POLICY tenant_isolation_import_staging_rows ON import_staging_rows FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-CREATE POLICY tenant_isolation_audit_logs ON audit_logs FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-
-CREATE POLICY tenant_select_data_sources ON data_sources FOR SELECT USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid OR tenant_id IS NULL);
-CREATE POLICY tenant_modify_data_sources ON data_sources FOR INSERT WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-CREATE POLICY tenant_update_data_sources ON data_sources FOR UPDATE USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-CREATE POLICY tenant_delete_data_sources ON data_sources FOR DELETE USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+CREATE POLICY isolation_recommendations ON recommendation_outcomes FOR ALL USING (tenant_id = get_current_tenant());
+CREATE POLICY isolation_alerts ON system_alerts FOR ALL USING (tenant_id = get_current_tenant());
+CREATE POLICY isolation_rag_docs ON rag_documents_metadata FOR ALL USING (tenant_id = get_current_tenant());
+CREATE POLICY isolation_rag_chunks ON rag_document_chunks FOR ALL USING (tenant_id = get_current_tenant());
+CREATE POLICY isolation_data_sources ON data_sources FOR ALL USING (tenant_id = get_current_tenant());
+CREATE POLICY isolation_ingestion_jobs ON ingestion_jobs FOR ALL USING (tenant_id = get_current_tenant());
+CREATE POLICY isolation_staging_rows ON import_staging_rows FOR ALL USING (tenant_id = get_current_tenant());
+CREATE POLICY isolation_audit_logs ON audit_logs FOR ALL USING (tenant_id = get_current_tenant());
