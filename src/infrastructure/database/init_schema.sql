@@ -553,6 +553,5 @@ CREATE POLICY isolation_rag_chunks ON rag_document_chunks FOR ALL USING (tenant_
 CREATE POLICY isolation_data_sources ON data_sources FOR ALL USING (tenant_id = get_current_tenant());
 CREATE POLICY isolation_ingestion_jobs ON ingestion_jobs FOR ALL USING (tenant_id = get_current_tenant());
 CREATE POLICY isolation_staging_rows ON import_staging_rows FOR ALL USING (tenant_id = get_current_tenant());
-
 CREATE POLICY select_audit_logs ON audit_logs FOR SELECT USING (tenant_id = get_current_tenant());
-CREATE POLICY insert_audit_logs ON audit_logs FOR INSERT WITH CHECK (tenant_id = get_current_tenant());
+CREATE POLICY insert_audit_logs ON audit_logs FOR INSERT WITH CHECK (true);
