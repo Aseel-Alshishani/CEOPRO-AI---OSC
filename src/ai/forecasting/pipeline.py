@@ -3,6 +3,17 @@ CEOPRO AI - Demand Forecasting Pipeline (spec S18, S22, S23, S25).
 Orchestrates: load history -> cold-start check -> baseline (+ XGBoost when
 enough data) -> pick whichever actually beats the baseline -> persist forecast
 + evidence. This is the only module that writes to the database.
+
+SCHEMA UPDATE: demand_forecasts is now a *period* forecast
+(forecast_start_date -> forecast_end_date) rather than a single target date,
+so `predicted_quantity` here is the total demand expected over the whole
+horizon (sum of the daily forecasts), not just the value on the last day as
+before. The old free-text `explanation` and single `confidence_score` no
+longer have dedicated columns; they're now folded into the `features_used`
+JSONB bag on demand_forecasts. Per-metric/per-feature evidence now requires a
+real forecast_id (evidence_records FK), so the "no data at all" case - which
+never produces a forecast - is now reported via a system_alert instead of an
+evidence record.
 """
 
 import logging
@@ -13,7 +24,7 @@ import numpy as np
 import pandas as pd
 
 from src.ai.forecasting import baselines, cold_start, data_access, evaluation, evidence
-from src.ai.forecasting.features import build_feature_frame
+from src.ai.forecasting.features import build_feature_frame, feature_columns
 from src.ai.forecasting.model import MODEL_NAME, XGBoostDemandForecaster, expanding_window_splits, walk_forward_validate
 
 logger = logging.getLogger("CEOPRO_AI_FORECASTING_PIPELINE")
@@ -78,13 +89,11 @@ def run_forecast(conn, tenant_id: str, product_id: str, horizon_days: int = 7) -
     daily = data_access.load_daily_demand(conn, tenant_id, product_id)
 
     if daily.empty:
-        explanation = "No historical transaction data is available for this product yet."
-        evidence_id = evidence.insert_evidence_record(
-            conn, tenant_id, "UNKNOWN", SOURCE_MODULE, {"product_id": product_id}, None, explanation, None
-        )
+        message = f"No historical transaction data is available yet for product {product_id}."
+        alert_id = evidence.insert_system_alert(conn, tenant_id, "FORECAST_NO_DATA", "INFO", message)
         conn.commit()
-        logger.info(f"No data for tenant={tenant_id} product={product_id}; recorded UNKNOWN evidence={evidence_id}")
-        return {"status": "UNKNOWN", "evidence_id": evidence_id}
+        logger.info(f"No data for tenant={tenant_id} product={product_id}; recorded alert={alert_id}")
+        return {"status": "UNKNOWN", "alert_id": alert_id}
 
     sufficiency = cold_start.assess(daily)
     product_context = data_access.load_product_context(conn, tenant_id, product_id) or {}
@@ -93,13 +102,17 @@ def run_forecast(conn, tenant_id: str, product_id: str, horizon_days: int = 7) -
 
     history = daily["quantity"]
     best_baseline_name, baseline_forecast = _best_baseline(history, horizon_days)
-    forecast_target_date = daily["date"].iloc[-1].date() + timedelta(days=horizon_days)
+
+    last_history_date = daily["date"].iloc[-1].date()
+    forecast_start_date = last_history_date + timedelta(days=1)
+    forecast_end_date = last_history_date + timedelta(days=horizon_days)
 
     chosen_source = "baseline"
     chosen_name = best_baseline_name
     forecast_values = baseline_forecast
     metrics = None
     trained_model_version_str = None
+    forecaster_for_evidence = None
 
     min_rows_for_validation = MIN_TRAIN_SIZE_FOR_VALIDATION + cold_start.MIN_VALIDATION_FOLDS
     feature_frame = build_feature_frame(daily, current_price, current_stock)
@@ -128,6 +141,7 @@ def run_forecast(conn, tenant_id: str, product_id: str, horizon_days: int = 7) -
             "mase": mase_value,
             "n_folds": validation["n_folds"],
             "baseline_scores": comparison["scores"],
+            "model_beats_all_baselines": comparison["model_beats_all_baselines"],
         }
 
         if comparison["model_beats_all_baselines"]:
@@ -138,50 +152,82 @@ def run_forecast(conn, tenant_id: str, product_id: str, horizon_days: int = 7) -
                 chosen_source = "xgboost"
                 chosen_name = MODEL_NAME
                 trained_model_version_str = date.today().isoformat()
-                evidence.insert_model_version(
-                    conn, MODEL_NAME, trained_model_version_str, "candidate", metrics
-                )
+                forecaster_for_evidence = forecaster
 
-    expected_demand = float(forecast_values[-1]) if len(forecast_values) else 0.0
+    predicted_quantity = float(np.sum(forecast_values)) if len(forecast_values) else 0.0
+    model_version = trained_model_version_str if chosen_source == "xgboost" else chosen_name
 
     if chosen_source == "xgboost":
-        spread = max(metrics["rmse"], 1.0)
         mase_is_valid = metrics["mase"] == metrics["mase"]  # False for NaN
         confidence_score = round(max(0.3, min(0.95, 1 - min(metrics["mase"], 1.0))), 2) if mase_is_valid else 0.5
-        baseline_summary = ", ".join(f"{k}={v:.2f}" for k, v in metrics["baseline_scores"].items() if k != "model")
+        daily_spread = max(metrics["rmse"], 1.0)
         explanation = (
             f"XGBoost forecast (trained {trained_model_version_str}) outperformed all baselines "
-            f"({baseline_summary}) over {metrics['n_folds']} walk-forward validation folds "
+            f"over {metrics['n_folds']} walk-forward validation folds "
             f"(MAE={metrics['mae']:.2f}, MASE={metrics['mase']:.2f})."
         )
     else:
         recent_std = float(history.tail(14).std()) if len(history) > 1 else 0.0
-        spread = recent_std if recent_std == recent_std else 0.0
+        daily_spread = recent_std if recent_std == recent_std else 0.0
         confidence_score = 0.4 if sufficiency.sufficient else 0.2
-        reason = "did not outperform the baseline" if sufficiency.sufficient else "insufficient historical data"
+        reason = (
+            "did not outperform the baseline"
+            if (metrics is not None and not metrics["model_beats_all_baselines"])
+            else "insufficient historical data"
+        )
         explanation = (
             f"Using '{best_baseline_name}' baseline forecast because {reason} "
             f"(available_days={sufficiency.available_days}, minimum_required={sufficiency.minimum_required})."
         )
 
-    confidence_range_lower = max(0.0, expected_demand - 1.28 * spread)
-    confidence_range_upper = expected_demand + 1.28 * spread
+    # Daily forecast errors are treated as independent, so the period-level
+    # spread scales with sqrt(horizon_days) rather than horizon_days directly.
+    period_spread = daily_spread * (horizon_days ** 0.5)
+    confidence_lower_bound = max(0.0, predicted_quantity - 1.28 * period_spread)
+    confidence_upper_bound = predicted_quantity + 1.28 * period_spread
+
+    features_used = {
+        "chosen_source": chosen_source,
+        "confidence_status": sufficiency.confidence_status,
+        "confidence_score": confidence_score,
+        "explanation": explanation,
+        "best_baseline_name": best_baseline_name,
+        "horizon_days": horizon_days,
+        "feature_columns": feature_columns() if chosen_source == "xgboost" else None,
+    }
 
     demand_forecasts_id = evidence.insert_demand_forecast(
-        conn, tenant_id, product_id, expected_demand, confidence_range_lower, confidence_range_upper,
-        forecast_target_date, chosen_name,
-    )
-
-    evidence_id = evidence.insert_evidence_record(
         conn,
         tenant_id,
-        "PREDICTION",
-        SOURCE_MODULE,
-        {"forecast_id": demand_forecasts_id, "product_id": product_id},
-        confidence_score,
-        explanation,
-        chosen_name,
+        product_id,
+        predicted_quantity,
+        confidence_lower_bound,
+        confidence_upper_bound,
+        forecast_start_date,
+        forecast_end_date,
+        model_version,
+        features_used,
     )
+
+    evidence_rows = [
+        ("data_sufficiency", sufficiency.as_dict(), 0.0),
+    ]
+    if metrics is not None:
+        evidence_rows.append(("validation_mae", {"value": metrics["mae"]}, 0.0))
+        evidence_rows.append(("validation_rmse", {"value": metrics["rmse"]}, 0.0))
+        evidence_rows.append(("validation_mase", {"value": metrics["mase"]}, 0.0))
+        evidence_rows.append(("baseline_scores", metrics["baseline_scores"], 0.0))
+        evidence_rows.append((
+            "model_beats_all_baselines",
+            {"value": metrics["model_beats_all_baselines"]},
+            1.0 if metrics["model_beats_all_baselines"] else -1.0,
+        ))
+
+    if forecaster_for_evidence is not None:
+        for feature_name, importance in forecaster_for_evidence.feature_importances().items():
+            evidence_rows.append((f"feature_importance:{feature_name}", {"importance": importance}, importance))
+
+    evidence.insert_evidence_metrics(conn, tenant_id, demand_forecasts_id, evidence_rows)
 
     conn.commit()
     logger.info(
@@ -193,9 +239,9 @@ def run_forecast(conn, tenant_id: str, product_id: str, horizon_days: int = 7) -
         "status": "OK",
         "source": chosen_source,
         "forecast_id": demand_forecasts_id,
-        "evidence_id": evidence_id,
-        "expected_demand": expected_demand,
-        "forecast_target_date": forecast_target_date.isoformat(),
+        "predicted_quantity": predicted_quantity,
+        "forecast_start_date": forecast_start_date.isoformat(),
+        "forecast_end_date": forecast_end_date.isoformat(),
         "confidence_score": confidence_score,
         "data_sufficiency": sufficiency.as_dict(),
     }

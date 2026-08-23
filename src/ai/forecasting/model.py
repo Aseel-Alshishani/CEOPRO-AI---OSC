@@ -41,6 +41,18 @@ class XGBoostDemandForecaster:
         X = feature_frame[self.columns].astype(float)
         return self.model.predict(X)
 
+    def feature_importances(self) -> dict:
+        """
+        Normalized (sums to 1) feature importances, keyed by column name. Used
+        to write per-feature contribution evidence rows now that there's no
+        model_versions table to persist this against instead (see evidence.py).
+        """
+        raw = self.model.feature_importances_
+        total = float(raw.sum())
+        if total <= 0:
+            return {col: 0.0 for col in self.columns}
+        return {col: float(value) / total for col, value in zip(self.columns, raw)}
+
 
 def expanding_window_splits(n_rows: int, min_train_size: int, n_splits: int) -> List[Tuple[range, range]]:
     """
