@@ -91,6 +91,14 @@ def run_forecast(conn, tenant_id: str, product_id: str, horizon_days: int = 7) -
     if daily.empty:
         message = f"No historical transaction data is available yet for product {product_id}."
         alert_id = evidence.insert_system_alert(conn, tenant_id, "FORECAST_NO_DATA", "INFO", message)
+        evidence.insert_audit_log(
+            conn,
+            tenant_id,
+            action_type="FORECAST_ALERT_RAISED",
+            target_table="system_alerts",
+            record_id=alert_id,
+            changed_data={"alert_type": "FORECAST_NO_DATA", "product_id": product_id, "message": message},
+        )
         conn.commit()
         logger.info(f"No data for tenant={tenant_id} product={product_id}; recorded alert={alert_id}")
         return {"status": "UNKNOWN", "alert_id": alert_id}
@@ -228,6 +236,22 @@ def run_forecast(conn, tenant_id: str, product_id: str, horizon_days: int = 7) -
             evidence_rows.append((f"feature_importance:{feature_name}", {"importance": importance}, importance))
 
     evidence.insert_evidence_metrics(conn, tenant_id, demand_forecasts_id, evidence_rows)
+
+    evidence.insert_audit_log(
+        conn,
+        tenant_id,
+        action_type="FORECAST_GENERATED",
+        target_table="demand_forecasts",
+        record_id=demand_forecasts_id,
+        changed_data={
+            "product_id": product_id,
+            "source": chosen_source,
+            "model_version": model_version,
+            "predicted_quantity": predicted_quantity,
+            "confidence_score": confidence_score,
+            "horizon_days": horizon_days,
+        },
+    )
 
     conn.commit()
     logger.info(
